@@ -1,50 +1,98 @@
 #!/usr/bin/env bash
-# qwen-session.sh — запуск изолированной сессии qwen-code для параллельной работы.
+# qwen-session.sh — запуск изолированной сессии qwen-code CLI для параллельной работы.
 #
-# Изоляция:
-#   - QWEN_HOME=~/.qwen-sessions/<name> — отдельный конфиг/история/todos на сессию
-#     (засеивается из базового ~/.qwen: settings.json + .env с ключами провайдеров).
-#   - --worktree <name> — qwen сам создаёт git worktree в <repoRoot>/.qwen/worktrees/<name>,
-#     поэтому правки файлов разных сессий не конфликтуют (свой рабочий дерево + ветка).
-#   - -m <model> — своя модель на сессию.
+# Идея: на одной рабочке поднимаем несколько CLI qwen-code над ОДНИМ проектом так,
+# чтобы они НЕ мешали друг другу:
+#   1) свой QWEN_HOME на сессию  → раздельные конфиг/история/сессии (нет гонок состояния);
+#   2) свой git worktree + ветка → файлы физически разделены, мёрж потом безопасный;
+#   3) своя модель/эндпоинт       → выбирается по -m из modelProviders (baseUrl + ключ).
 #
 # Использование:
-#   ./qwen-session.sh <session-name> [model]
+#   ./qwen-session.sh <session-name> [model-id] [-- доп.аргументы qwen...]
 #
 # Примеры:
 #   ./qwen-session.sh web-a Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
 #   ./qwen-session.sh web-b deepseek-v4-flash
+#   ./qwen-session.sh web-a              # модель по умолчанию из базового settings.json
+#   ./qwen-session.sh web-a <model> -- --approval-mode auto-edit
 #
-# Доступные модели (из ~/.qwen/settings.json modelProviders.openai):
-#   - Qwen/Qwen3-235B-A22B-Instruct-2507-FP8   (Gonka, ключ GONKA_API_KEY)
-#   - deepseek-v4-flash                        (DeepSeek, ключ DEEPSEEK_API_KEY)
 set -euo pipefail
 
-NAME="${1:?usage: qwen-session.sh <session-name> [model]}"
-MODEL="${2:-Qwen/Qwen3-235B-A22B-Instruct-2507-FP8}"
+# ---------- настройки ----------
+BASE_QWEN_HOME="${BASE_QWEN_HOME:-$HOME/.qwen}"          # эталонный конфиг (settings.json, .env, skills...)
+SESSIONS_ROOT="${SESSIONS_ROOT:-$HOME/.qwen-sessions}"   # сюда складываем изолированные QWEN_HOME
+APPROVAL_MODE="${APPROVAL_MODE:-default}"               # plan|default|auto-edit|auto|yolo
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_QWEN="${QWEN_HOME_BASE:-$HOME/.qwen}"
-SESSION_HOME="$HOME/.qwen-sessions/$NAME"
-
-# 1. Засеять изолированный конфиг из базового (только при первом запуске).
-mkdir -p "$SESSION_HOME"
-for f in settings.json .env; do
-  if [[ -f "$BASE_QWEN/$f" && ! -f "$SESSION_HOME/$f" ]]; then
-    cp "$BASE_QWEN/$f" "$SESSION_HOME/$f"
-  fi
-done
-
-# 2. Репозиторий обязателен для --worktree.
-if ! git -C "$PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "error: $PROJECT_ROOT не под git — сначала: git init && git add -A && git commit" >&2
+# ---------- разбор аргументов ----------
+if [[ $# -lt 1 ]]; then
+  echo "Использование: $0 <session-name> [model-id] [-- доп.аргументы qwen...]" >&2
   exit 1
 fi
 
-echo ">> session=$NAME  model=$MODEL"
-echo ">> QWEN_HOME=$SESSION_HOME"
-echo ">> worktree=$PROJECT_ROOT/.qwen/worktrees/$NAME"
+SESSION="$1"; shift
+MODEL=""
+if [[ $# -gt 0 && "$1" != "--" ]]; then
+  MODEL="$1"; shift
+fi
+# всё после "--" уходит как есть в qwen
+EXTRA_ARGS=()
+if [[ $# -gt 0 && "$1" == "--" ]]; then
+  shift
+  EXTRA_ARGS=("$@")
+fi
 
-# 3. Запуск изолированной сессии в собственном git worktree.
-cd "$PROJECT_ROOT"
-exec env QWEN_HOME="$SESSION_HOME" qwen -m "$MODEL" --worktree "$NAME"
+# slug: только [a-z0-9-], чтобы безопасно использовать как имя ветки/каталога
+if ! [[ "$SESSION" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  echo "Ошибка: имя сессии '$SESSION' должно быть из [a-z0-9-] (например web-a)." >&2
+  exit 1
+fi
+
+# ---------- проверка git-репозитория проекта ----------
+if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+  cat >&2 <<EOF
+Ошибка: текущая папка не git-репозиторий.
+qwen-code создаёт worktree/ветку внутри репозитория проекта.
+Инициализируй один раз:
+    git init && git add -A && git commit -m "init multi-agent project"
+затем запусти скрипт снова.
+EOF
+  exit 1
+fi
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# ---------- изолированный QWEN_HOME ----------
+SESSION_HOME="$SESSIONS_ROOT/$SESSION"
+if [[ ! -d "$SESSION_HOME" ]]; then
+  echo ">> Создаю изолированный QWEN_HOME: $SESSION_HOME"
+  mkdir -p "$SESSION_HOME"
+
+  # копируем конфиг (у каждой сессии своя правка settings/история)
+  [[ -f "$BASE_QWEN_HOME/settings.json"        ]] && cp "$BASE_QWEN_HOME/settings.json"        "$SESSION_HOME/"
+  [[ -f "$BASE_QWEN_HOME/output-language.md"   ]] && cp "$BASE_QWEN_HOME/output-language.md"   "$SESSION_HOME/"
+  [[ -f "$BASE_QWEN_HOME/source.json"          ]] && cp "$BASE_QWEN_HOME/source.json"          "$SESSION_HOME/"
+
+  # .env (API-ключи) и skills — общие, поэтому симлинком, чтобы не плодить копии секретов
+  [[ -e "$BASE_QWEN_HOME/.env"    ]] && ln -sf "$BASE_QWEN_HOME/.env"    "$SESSION_HOME/.env"
+  [[ -d "$BASE_QWEN_HOME/skills"  ]] && ln -sf "$BASE_QWEN_HOME/skills"  "$SESSION_HOME/skills"
+else
+  echo ">> Использую существующий QWEN_HOME: $SESSION_HOME"
+fi
+
+# ---------- запуск ----------
+echo ">> session : $SESSION"
+echo ">> repo    : $REPO_ROOT"
+echo ">> worktree: $REPO_ROOT/.qwen/worktrees/$SESSION  (ветка создаётся qwen-code)"
+echo ">> model   : ${MODEL:-<из settings.json>}"
+echo ">> approval: $APPROVAL_MODE"
+echo
+
+QWEN_CMD=( qwen
+  --worktree "$SESSION"
+  --chat-recording           # нужно для --continue/--resume
+  --approval-mode "$APPROVAL_MODE"
+)
+[[ -n "$MODEL" ]] && QWEN_CMD+=( -m "$MODEL" )
+QWEN_CMD+=( "${EXTRA_ARGS[@]}" )
+
+# QWEN_HOME изолирует конфиг/историю/сессии этого CLI от остальных
+exec env QWEN_HOME="$SESSION_HOME" "${QWEN_CMD[@]}"
