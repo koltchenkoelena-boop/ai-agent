@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Agent — 4 Panel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 4px;
+            padding: 4px;
+        }
+        .panel {
+            display: flex;
+            flex-direction: column;
+            background: #16213e;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #0f3460;
+        }
+        .panel-header {
+            padding: 8px 12px;
+            background: #0f3460;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        .panel-header .agent-name {
+            font-weight: 700;
+            font-size: 14px;
+            color: #e94560;
+        }
+        .panel-header .status {
+            font-size: 11px;
+            color: #666;
+        }
+        .panel-header .status.online { color: #4caf50; }
+        .panel-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .msg {
+            max-width: 85%;
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .msg.user { align-self: flex-end; background: #0f3460; }
+        .msg.assistant { align-self: flex-start; background: #1a1a4e; border: 1px solid #2a2a5e; }
+        .msg.streaming { border-color: #e94560; }
+        .msg a { color: #64b5f6; text-decoration: underline; }
+        .msg .chat-img {
+            display: block;
+            max-width: 100%;
+            max-height: 200px;
+            border-radius: 6px;
+            margin: 4px 0;
+        }
+        .msg pre { background: #0a0a1e; padding: 6px; border-radius: 4px; margin: 4px 0; overflow-x: auto; font-size: 11px; }
+        .msg code { background: #0a0a1e; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+        .panel-input {
+            display: flex;
+            gap: 6px;
+            padding: 8px;
+            border-top: 1px solid #0f3460;
+            flex-shrink: 0;
+        }
+        .panel-input textarea {
+            flex: 1;
+            background: #0f3460;
+            border: 1px solid #1a1a4e;
+            border-radius: 6px;
+            color: #eee;
+            padding: 8px;
+            font-size: 13px;
+            resize: none;
+            min-height: 36px;
+            max-height: 60px;
+            font-family: inherit;
+        }
+        .panel-input textarea:focus { outline: none; border-color: #e94560; }
+        .panel-input button {
+            background: #e94560;
+            border: none;
+            border-radius: 6px;
+            color: white;
+            padding: 8px 14px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 13px;
+        }
+        .panel-input button:disabled { background: #666; cursor: not-allowed; }
+
+        /* Auth overlay */
+        .auth-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .auth-overlay.hidden { display: none; }
+        .auth-box {
+            background: #16213e;
+            padding: 28px;
+            border-radius: 14px;
+            width: 320px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .auth-box h2 { color: #e94560; text-align: center; font-size: 18px; }
+        .auth-box input {
+            background: #0f3460;
+            border: 1px solid #1a1a4e;
+            border-radius: 6px;
+            color: #eee;
+            padding: 10px;
+            font-size: 14px;
+        }
+        .auth-box input:focus { outline: none; border-color: #e94560; }
+        .auth-btns { display: flex; gap: 8px; }
+        .auth-btns button {
+            flex: 1; padding: 10px; border: none; border-radius: 6px;
+            cursor: pointer; font-weight: 600; background: #e94560; color: white;
+        }
+        .auth-btns button.sec { background: #0f3460; }
+        .auth-err { color: #f44336; font-size: 12px; text-align: center; min-height: 16px; }
+    </style>
+</head>
+<body>
+    <div id="auth-overlay" class="auth-overlay">
+        <div class="auth-box">
+            <h2>🤖 Multi-Agent 4-Panel</h2>
+            <input type="text" id="auth-user" placeholder="Имя пользователя">
+            <input type="password" id="auth-pass" placeholder="Пароль"
+                   onkeydown="if(event.key==='Enter')doLogin()">
+            <div class="auth-btns">
+                <button onclick="doLogin()">🔑 Войти</button>
+                <button class="sec" onclick="doSignup()">📝 Регистрация</button>
+            </div>
+            <div id="auth-err" class="auth-err"></div>
+        </div>
+    </div>
+
+    <script>
+    const AGENTS = [
+        { name: 'planner', port: 8001, desc: 'Планировщик' },
+        { name: 'coder', port: 8002, desc: 'Кодер' },
+        { name: 'researcher', port: 8003, desc: 'Исследователь' },
+        { name: 'reviewer', port: 8004, desc: 'Ревьюер' },
+    ];
+
+    const BASE_HOST = window.location.hostname;
+    const BASE_PORT = window.location.port;
+    const USE_PROXY = !BASE_PORT || BASE_PORT === '80' || BASE_PORT === '443';
+
+    function agentUrl(agent, path) {
+        if (USE_PROXY) return `${window.location.origin}/${agent.name}${path}`;
+        return `http://${BASE_HOST}:${agent.port}${path}`;
+    }
+    function agentWsUrl(agent, path) {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        if (USE_PROXY) return `${proto}//${window.location.host}/${agent.name}${path}`;
+        return `${proto}//${BASE_HOST}:${agent.port}${path}`;
+    }
+
+    let token = null;
+    let sessionId = localStorage.getItem('session_id_4panel');
+    if (!sessionId) {
+        sessionId = 'q-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        localStorage.setItem('session_id_4panel', sessionId);
+    }
+
+    const panels = {}; // agent_name -> { ws, streaming, el }
+
+    // --- Auth ---
+    async function checkAuth() {
+        token = localStorage.getItem('auth_token');
+        if (!token) return false;
+        try {
+            const r = await fetch(agentUrl(AGENTS[0], `/auth/me?token=${encodeURIComponent(token)}`),
+                { signal: AbortSignal.timeout(3000) });
+            if (r.status === 401) { localStorage.removeItem('auth_token'); return false; }
+            return r.ok;
+        } catch(e) { return true; }
+    }
+
+    async function doAuth(endpoint) {
+        const u = document.getElementById('auth-user').value.trim();
+        const p = document.getElementById('auth-pass').value;
+        const err = document.getElementById('auth-err');
+        err.textContent = '';
+        if (!u || !p) { err.textContent = 'Введите имя и пароль'; return; }
+        try {
+            const r = await fetch(agentUrl(AGENTS[0], `/auth/${endpoint}`), {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({username:u, password:p})
+            });
+            const d = await r.json();
+            if (!r.ok) { err.textContent = d.detail || 'Ошибка'; return; }
+            localStorage.setItem('auth_token', d.token);
+            localStorage.setItem('auth_username', d.username);
+            token = d.token;
+            document.getElementById('auth-overlay').classList.add('hidden');
+            startPanels();
+        } catch(e) { err.textContent = 'Сервер недоступен'; }
+    }
+    function doLogin() { doAuth('login'); }
+    function doSignup() { doAuth('signup'); }
+
+    // --- Panels ---
+    function startPanels() {
+        AGENTS.forEach(agent => {
+            const panel = document.createElement('div');
+            panel.className = 'panel';
+            panel.innerHTML = `
+                <div class="panel-header">
+                    <span class="agent-name">${agent.name}</span>
+                    <span class="status" id="st-${agent.name}">connecting...</span>
+                </div>
+                <div class="panel-messages" id="msgs-${agent.name}"></div>
+                <div class="panel-input">
+                    <textarea id="input-${agent.name}" placeholder="Сообщение для ${agent.name}..."
+                        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendTo('${agent.name}');}"></textarea>
+                    <button id="btn-${agent.name}" onclick="sendTo('${agent.name}')">▶</button>
+                </div>
+            `;
+            document.body.appendChild(panel);
+            panels[agent.name] = { el: panel, streaming: null, ws: null };
+            connectAgent(agent);
+        });
+    }
+
+    function connectAgent(agent) {
+        const ws = new WebSocket(agentWsUrl(agent, `/ws/${sessionId}?token=${encodeURIComponent(token)}`));
+        panels[agent.name].ws = ws;
+
+        ws.onopen = () => {
+            document.getElementById(`st-${agent.name}`).textContent = 'online';
+            document.getElementById(`st-${agent.name}`).className = 'status online';
+        };
+        ws.onclose = (ev) => {
+            document.getElementById(`st-${agent.name}`).textContent = 'offline';
+            document.getElementById(`st-${agent.name}`).className = 'status';
+            if (ev.code === 4001) { localStorage.removeItem('auth_token'); location.reload(); return; }
+            setTimeout(() => connectAgent(agent), 3000);
+        };
+        ws.onmessage = (ev) => {
+            const data = JSON.parse(ev.data);
+            const p = panels[agent.name];
+            if (data.type === 'chunk') {
+                if (!p.streaming) {
+                    p.streaming = addMsg(agent.name, '', 'assistant');
+                    p.streaming.classList.add('streaming');
+                }
+                p.streaming.textContent += data.content;
+                scrollPanel(agent.name);
+            } else if (data.type === 'done') {
+                if (p.streaming) {
+                    p.streaming.innerHTML = renderMarkdown(p.streaming.textContent);
+                    p.streaming.classList.remove('streaming');
+                    p.streaming = null;
+                }
+                document.getElementById(`btn-${agent.name}`).disabled = false;
+            }
+        };
+    }
+
+    function sendTo(name) {
+        const input = document.getElementById(`input-${name}`);
+        const text = input.value.trim();
+        const ws = panels[name].ws;
+        if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+        addMsg(name, text, 'user');
+        ws.send(JSON.stringify({ content: text }));
+        input.value = '';
+        document.getElementById(`btn-${name}`).disabled = true;
+    }
+
+    function addMsg(agentName, text, role) {
+        const container = document.getElementById(`msgs-${agentName}`);
+        const div = document.createElement('div');
+        div.className = `msg ${role}`;
+        div.textContent = text;
+        container.appendChild(div);
+        scrollPanel(agentName);
+        return div;
+    }
+
+    function scrollPanel(name) {
+        const el = document.getElementById(`msgs-${name}`);
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+        const d = document.createElement('div');
+        d.textContent = text;
+        return d.innerHTML;
+    }
+
+    function renderMarkdown(text) {
+        let html = escapeHtml(text);
+        html = html.replace(/!\[([^\]]*)\]\s*\(([^)]+)\)/g, '<img src="$2" alt="$1" class="chat-img" onerror="this.style.display=\'none\'">');
+        html = html.replace(/(^|<br>|\n)(https?:\/\/[^\s]+\.(?:jpg|jpeg|png|gif|webp)[^\s]*)(<br>|\n|$)/gi, '$1<img src="$2" class="chat-img" onerror="this.style.display=\'none\'">$3');
+        html = html.replace(/\[([^\]]+)\]\s*\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        html = html.replace(/\n/g, '<br>');
+        return html;
+    }
+
+    // --- Init ---
+    (async () => {
+        if (await checkAuth()) {
+            document.getElementById('auth-overlay').classList.add('hidden');
+            startPanels();
+        }
+    })();
+    </script>
+</body>
+</html>

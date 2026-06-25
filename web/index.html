@@ -151,6 +151,17 @@
         .connection-status.connected { color: #4caf50; }
         .connection-status.disconnected { color: #f44336; }
 
+        .message a { color: #64b5f6; text-decoration: underline; }
+        .message .chat-img {
+            display: block;
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 8px;
+            margin: 8px 0;
+            cursor: pointer;
+        }
+        .message .chat-img:hover { opacity: 0.9; box-shadow: 0 0 10px rgba(233,69,96,0.3); }
+
         /* Auth */
         .auth-modal {
             position: fixed;
@@ -226,15 +237,16 @@
     </style>
 </head>
 <body>
-    <div id="auth-modal" class="auth-modal hidden">
+    <div id="auth-modal" class="auth-modal">
         <div class="auth-form">
-            <h2>Multi-Agent Chat</h2>
+            <h2>🤖 Multi-Agent Chat</h2>
+            <p style="text-align:center;font-size:13px;opacity:0.7;margin-bottom:4px">Войдите или зарегистрируйтесь</p>
             <input type="text" id="auth-username" placeholder="Имя пользователя" autocomplete="username">
-            <input type="password" id="auth-password" placeholder="Пароль" autocomplete="current-password"
+            <input type="password" id="auth-password" placeholder="Пароль (мин. 4 символа)" autocomplete="current-password"
                    onkeydown="if(event.key==='Enter'){event.preventDefault();doLogin();}">
             <div class="auth-buttons">
-                <button onclick="doLogin()">Войти</button>
-                <button onclick="doSignup()" class="secondary">Регистрация</button>
+                <button onclick="doLogin()">🔑 Войти</button>
+                <button onclick="doSignup()" class="secondary">📝 Регистрация</button>
             </div>
             <div id="auth-error" class="auth-error"></div>
         </div>
@@ -243,6 +255,8 @@
         <h2>Agents</h2>
         <div id="agent-list"></div>
         <div class="sidebar-footer">
+            <a href="quad.html" target="_blank" style="font-size:11px;color:#64b5f6;text-decoration:none;">⊞ 4 панели</a>
+            <a href="dispatcher.html" target="_blank" style="font-size:11px;color:#e94560;text-decoration:none;">⚙ Диспетчер</a>
             <span id="username-display"></span>
             <button class="logout-btn" onclick="logout()">Выйти</button>
         </div>
@@ -273,12 +287,33 @@
 
     let currentAgent = null;
     let ws = null;
-    let sessionId = localStorage.getItem('session_id') || crypto.randomUUID();
-    localStorage.setItem('session_id', sessionId);
+    let sessionId = localStorage.getItem('session_id');
+    if (!sessionId) {
+        sessionId = 'sess-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        localStorage.setItem('session_id', sessionId);
+    }
     let streamingMsg = null;
 
-    // Determine base host (for remote access)
+    // Determine base host and routing mode
     const BASE_HOST = window.location.hostname;
+    const BASE_PORT = window.location.port;
+    // If accessed via standard port (80/443 through nginx) — use path-based routing
+    const USE_PROXY = !BASE_PORT || BASE_PORT === '80' || BASE_PORT === '443';
+
+    function agentUrl(agent, path) {
+        if (USE_PROXY) {
+            return `${window.location.origin}/${agent.name}${path}`;
+        }
+        return `http://${BASE_HOST}:${agent.port}${path}`;
+    }
+
+    function agentWsUrl(agent, path) {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        if (USE_PROXY) {
+            return `${proto}//${window.location.host}/${agent.name}${path}`;
+        }
+        return `${proto}//${BASE_HOST}:${agent.port}${path}`;
+    }
 
     // ---- Auth ----
     function showAuthModal() {
@@ -305,9 +340,8 @@
             return;
         }
         // авторизация через первый агент (токен кросс-агентный)
-        const port = AGENTS[0].port;
         try {
-            const resp = await fetch(`http://${BASE_HOST}:${port}/auth/${endpoint}`, {
+            const resp = await fetch(agentUrl(AGENTS[0], `/auth/${endpoint}`), {
                 method: 'POST',
                 headers: authHeaders(),
                 body: JSON.stringify({ username, password })
@@ -343,7 +377,7 @@
         const token = localStorage.getItem('auth_token');
         if (!token) return false;
         try {
-            const resp = await fetch(`http://${BASE_HOST}:${AGENTS[0].port}/auth/me?token=${encodeURIComponent(token)}`,
+            const resp = await fetch(agentUrl(AGENTS[0], `/auth/me?token=${encodeURIComponent(token)}`),
                 { signal: AbortSignal.timeout(3000) });
             if (resp.status === 401) {
                 localStorage.removeItem('auth_token');
@@ -358,6 +392,7 @@
 
     async function init() {
         if (await checkAuth()) {
+            hideAuthModal();
             startApp();
         } else {
             showAuthModal();
@@ -388,7 +423,7 @@
 
     async function checkHealth(agent) {
         try {
-            const resp = await fetch(`http://${BASE_HOST}:${agent.port}/health`, { signal: AbortSignal.timeout(3000) });
+            const resp = await fetch(agentUrl(agent, '/health'), { signal: AbortSignal.timeout(3000) });
             if (resp.ok) {
                 document.getElementById(`status-${agent.name}`).classList.add('online');
             }
@@ -408,7 +443,7 @@
         document.getElementById('messages').innerHTML = '';
 
         // Fetch model info
-        fetch(`http://${BASE_HOST}:${agent.port}/info`)
+        fetch(agentUrl(agent, '/info'))
             .then(r => r.json())
             .then(data => {
                 document.getElementById('current-model').textContent = data.model;
@@ -424,8 +459,7 @@
         if (ws) ws.close();
 
         const token = localStorage.getItem('auth_token');
-        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        ws = new WebSocket(`${proto}//${BASE_HOST}:${agent.port}/ws/${sessionId}?token=${encodeURIComponent(token)}`);
+        ws = new WebSocket(agentWsUrl(agent, `/ws/${sessionId}?token=${encodeURIComponent(token)}`));
 
         ws.onopen = () => {
             document.getElementById('conn-status').textContent = 'connected';
@@ -458,6 +492,7 @@
                 }
             } else if (data.type === 'done') {
                 if (streamingMsg) {
+                    streamingMsg.innerHTML = renderMarkdown(streamingMsg.textContent);
                     streamingMsg.classList.remove('streaming');
                     streamingMsg = null;
                 }
@@ -495,6 +530,25 @@
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    function renderMarkdown(text) {
+        let html = escapeHtml(text);
+        // Images: ![alt](url) — allow whitespace/newlines between ] and (
+        html = html.replace(/!\[([^\]]*)\]\s*\(([^)]+)\)/g, '<img src="$2" alt="$1" class="chat-img" onerror="this.style.display=\'none\'">');
+        // Bare image URLs on their own line
+        html = html.replace(/(^|<br>|\n)(https?:\/\/[^\s]+\.(?:jpg|jpeg|png|gif|webp)[^\s]*)(<br>|\n|$)/gi, '$1<img src="$2" class="chat-img" onerror="this.style.display=\'none\'">$3');
+        // Links: [text](url)
+        html = html.replace(/\[([^\]]+)\]\s*\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        // Bold: **text**
+        html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        // Code blocks: ```...```
+        html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+        // Inline code: `text`
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        // Line breaks
+        html = html.replace(/\n/g, '<br>');
+        return html;
     }
 
     init();

@@ -2,6 +2,9 @@
 .env
 *.key
 
+# shared runtime state + user data (PII, sessions db, mailbox, results)
+shared/
+
 # qwen-code per-project + worktrees
 .qwen/
 
@@ -15,3 +18,7 @@ __pycache__/
 myenv/
 venv/
 .venv/
+
+# editor/sync backups
+*.bak
+*.bak.*

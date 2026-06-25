@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dispatcher — Admin Panel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+
+        /* Auth modal */
+        .auth-modal {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.8);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 1000;
+        }
+        .auth-modal.hidden { display: none; }
+        .auth-form {
+            background: #16213e;
+            padding: 32px; border-radius: 16px; width: 340px;
+            display: flex; flex-direction: column; gap: 12px;
+        }
+        .auth-form h2 { color: #e94560; text-align: center; }
+        .auth-form input {
+            background: #0f3460; border: 1px solid #1a1a4e; border-radius: 8px;
+            color: #eee; padding: 12px; font-size: 14px;
+        }
+        .auth-form input:focus { outline: none; border-color: #e94560; }
+        .auth-form button {
+            padding: 12px; border: none; border-radius: 8px; cursor: pointer;
+            font-weight: 600; background: #e94560; color: white;
+        }
+        .auth-error { color: #f44336; font-size: 13px; text-align: center; min-height: 20px; }
+
+        /* Top bar */
+        .topbar {
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            padding: 12px 24px;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .topbar h1 { font-size: 18px; color: #e94560; }
+        .topbar .right { display: flex; align-items: center; gap: 12px; }
+        .topbar .user-info { font-size: 13px; opacity: 0.7; }
+        .topbar .back-link {
+            color: #64b5f6; text-decoration: none; font-size: 13px;
+        }
+        .topbar button {
+            background: #0f3460; border: 1px solid #1a1a4e; border-radius: 8px;
+            color: #eee; padding: 6px 14px; cursor: pointer; font-size: 12px;
+        }
+        .topbar button:hover { background: #1a1a6e; }
+
+        /* Tabs */
+        .tabs {
+            display: flex; gap: 2px;
+            background: #16213e;
+            padding: 0 24px;
+            border-bottom: 1px solid #0f3460;
+        }
+        .tab {
+            padding: 10px 20px; cursor: pointer;
+            border-bottom: 2px solid transparent;
+            font-size: 14px; color: #aaa;
+            transition: all 0.2s;
+        }
+        .tab:hover { color: #eee; }
+        .tab.active { color: #e94560; border-bottom-color: #e94560; }
+
+        /* Content */
+        .content { padding: 24px; max-width: 1200px; margin: 0 auto; }
+
+        .panel { display: none; }
+        .panel.active { display: block; }
+
+        /* Cards */
+        .stats-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px; margin-bottom: 24px;
+        }
+        .stat-card {
+            background: #16213e; border: 1px solid #0f3460;
+            border-radius: 12px; padding: 20px; text-align: center;
+        }
+        .stat-card .value { font-size: 32px; font-weight: 700; color: #e94560; }
+        .stat-card .label { font-size: 12px; opacity: 0.6; margin-top: 4px; }
+
+        /* Tables */
+        table {
+            width: 100%; border-collapse: collapse;
+            background: #16213e; border-radius: 12px; overflow: hidden;
+        }
+        th, td {
+            padding: 10px 14px; text-align: left;
+            border-bottom: 1px solid #0f3460;
+        }
+        th { background: #0f3460; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        td { font-size: 13px; }
+        tr:hover td { background: #1a1a4e; }
+        .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 10px;
+            font-size: 11px; font-weight: 600;
+        }
+        .badge.active { background: #1b5e20; color: #a5d6a7; }
+        .badge.completed { background: #1a237e; color: #90caf9; }
+        .badge.interrupted { background: #b71c1c; color: #ef9a9a; }
+        .badge.planner { background: #4a148c; color: #ce93d8; }
+        .badge.coder { background: #0d47a1; color: #90caf9; }
+        .badge.researcher { background: #004d40; color: #80cbc4; }
+        .badge.reviewer { background: #e65100; color: #ffcc80; }
+
+        .actions button {
+            background: none; border: 1px solid #333; border-radius: 6px;
+            color: #aaa; padding: 4px 10px; cursor: pointer; font-size: 11px;
+            margin-right: 4px;
+        }
+        .actions button:hover { color: #eee; border-color: #666; }
+        .actions button.danger:hover { color: #f44336; border-color: #f44336; }
+
+        /* Filters */
+        .filters {
+            display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap;
+            align-items: center;
+        }
+        .filters select, .filters input {
+            background: #0f3460; border: 1px solid #1a1a4e; border-radius: 8px;
+            color: #eee; padding: 8px 12px; font-size: 13px;
+        }
+        .filters select:focus, .filters input:focus { outline: none; border-color: #e94560; }
+        .filters button {
+            background: #e94560; border: none; border-radius: 8px;
+            color: white; padding: 8px 16px; cursor: pointer; font-size: 13px;
+        }
+
+        .pagination {
+            display: flex; justify-content: center; gap: 8px; margin-top: 16px;
+        }
+        .pagination button {
+            background: #0f3460; border: 1px solid #1a1a4e; border-radius: 6px;
+            color: #eee; padding: 6px 14px; cursor: pointer; font-size: 13px;
+        }
+        .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .pagination button.active { background: #e94560; }
+
+        /* Session detail modal */
+        .modal-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 900;
+        }
+        .modal-overlay.hidden { display: none; }
+        .modal {
+            background: #16213e; border-radius: 16px; padding: 24px;
+            max-width: 800px; width: 90%; max-height: 80vh; overflow-y: auto;
+        }
+        .modal h3 { color: #e94560; margin-bottom: 16px; }
+        .modal .close-btn {
+            float: right; background: none; border: none; color: #aaa;
+            font-size: 20px; cursor: pointer;
+        }
+        .modal .close-btn:hover { color: #eee; }
+        .msg-list { display: flex; flex-direction: column; gap: 8px; }
+        .msg-item {
+            padding: 8px 12px; border-radius: 8px; font-size: 13px;
+            line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+        }
+        .msg-item.user { background: #0f3460; align-self: flex-end; max-width: 80%; }
+        .msg-item.assistant { background: #1a1a4e; border: 1px solid #2a2a5e; max-width: 80%; }
+        .msg-item.tool_call { background: #1a1a1a; border-left: 3px solid #ff9800; font-family: monospace; font-size: 12px; }
+        .msg-item.tool_result { background: #1a1a1a; border-left: 3px solid #4caf50; font-family: monospace; font-size: 12px; }
+        .msg-meta { font-size: 10px; opacity: 0.5; margin-top: 2px; }
+
+        .empty { text-align: center; padding: 40px; opacity: 0.4; }
+        .refresh-hint { font-size: 11px; opacity: 0.4; margin-left: 8px; }
+    </style>
+</head>
+<body>
+
+<!-- Auth -->
+<div id="auth-modal" class="auth-modal">
+    <div class="auth-form">
+        <h2>🛡️ Dispatcher Admin</h2>
+        <p style="text-align:center;font-size:13px;opacity:0.7;margin-bottom:4px">Вход для администратора</p>
+        <input type="text" id="auth-username" placeholder="Имя пользователя" autocomplete="username">
+        <input type="password" id="auth-password" placeholder="Пароль"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();doLogin();}">
+        <button onclick="doLogin()">🔑 Войти</button>
+        <div id="auth-error" class="auth-error"></div>
+    </div>
+</div>
+
+<!-- Top bar -->
+<div class="topbar">
+    <h1>⚙️ Dispatcher</h1>
+    <div class="right">
+        <a href="index.html" class="back-link">← Чат</a>
+        <span class="user-info" id="user-info"></span>
+        <button onclick="logout()">Выйти</button>
+    </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs">
+    <div class="tab active" data-tab="overview" onclick="switchTab('overview')">Обзор</div>
+    <div class="tab" data-tab="connections" onclick="switchTab('connections')">Соединения</div>
+    <div class="tab" data-tab="sessions" onclick="switchTab('sessions')">Сессии</div>
+    <div class="tab" data-tab="users" onclick="switchTab('users')">Пользователи</div>
+    <div class="tab" data-tab="stats" onclick="switchTab('stats')">Статистика</div>
+</div>
+
+<!-- Content -->
+<div class="content">
+
+    <!-- Overview -->
+    <div class="panel active" id="panel-overview">
+        <div class="stats-grid" id="overview-stats"></div>
+        <h3 style="margin-bottom:12px;">Активные соединения <span class="refresh-hint">(авто-обновление 5с)</span></h3>
+        <table id="overview-connections">
+            <thead><tr><th>Сессия</th><th>Пользователь</th><th>Агент</th><th>Модель</th><th>Время</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <!-- Connections -->
+    <div class="panel" id="panel-connections">
+        <h3 style="margin-bottom:12px;">Активные WebSocket-соединения <span class="refresh-hint">(авто-обновление 5с)</span></h3>
+        <table id="connections-table">
+            <thead><tr><th>Session ID</th><th>Пользователь</th><th>Агент</th><th>Модель</th><th>Подключён</th><th>Длительность</th><th>Послед. сообщ.</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <!-- Sessions -->
+    <div class="panel" id="panel-sessions">
+        <div class="filters">
+            <select id="f-agent">
+                <option value="">Все агенты</option>
+                <option value="planner">planner</option>
+                <option value="coder">coder</option>
+                <option value="researcher">researcher</option>
+                <option value="reviewer">reviewer</option>
+            </select>
+            <select id="f-status">
+                <option value="">Все статусы</option>
+                <option value="active">active</option>
+                <option value="completed">completed</option>
+                <option value="interrupted">interrupted</option>
+            </select>
+            <input type="text" id="f-user" placeholder="Пользователь...">
+            <button onclick="loadSessions()">Найти</button>
+        </div>
+        <table id="sessions-table">
+            <thead><tr><th>ID</th><th>Пользователь</th><th>Агент</th><th>Модель</th><th>Статус</th><th>Сообщений</th><th>Начало</th><th>Действия</th></tr></thead>
+            <tbody></tbody>
+        </table>
+        <div class="pagination" id="sessions-pagination"></div>
+    </div>
+
+    <!-- Users -->
+    <div class="panel" id="panel-users">
+        <h3 style="margin-bottom:12px;">Пользователи</h3>
+        <table id="users-table">
+            <thead><tr><th>Пользователь</th><th>Сессий</th><th>Сообщений</th><th>Токены</th><th>Послед. актив.</th><th>Действия</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <!-- Stats -->
+    <div class="panel" id="panel-stats">
+        <div class="filters">
+            <select id="stats-by" onchange="loadStats()">
+                <option value="daily">По дням</option>
+                <option value="agent">По агентам</option>
+                <option value="model">По моделям</option>
+                <option value="user">По пользователям</option>
+            </select>
+        </div>
+        <table id="stats-table">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Session Detail Modal -->
+<div class="modal-overlay hidden" id="session-modal">
+    <div class="modal">
+        <button class="close-btn" onclick="closeSessionModal()">✕</button>
+        <h3 id="modal-title">Сессия</h3>
+        <div id="modal-meta" style="font-size:12px;opacity:0.6;margin-bottom:16px;"></div>
+        <div class="msg-list" id="modal-messages"></div>
+    </div>
+</div>
+
+<script>
+// --- Config ---
+const BASE_HOST = window.location.hostname;
+const BASE_PORT = window.location.port;
+const USE_PROXY = !BASE_PORT || BASE_PORT === '80' || BASE_PORT === '443';
+const DISPATCHER_PORT = 8005;
+
+function dispatcherUrl(path) {
+    if (USE_PROXY) return `${window.location.origin}/dispatcher${path}`;
+    return `http://${BASE_HOST}:${DISPATCHER_PORT}${path}`;
+}
+
+function agentUrl(agentName, path) {
+    const ports = { planner: 8001, coder: 8002, researcher: 8003, reviewer: 8004 };
+    if (USE_PROXY) return `${window.location.origin}/${agentName}${path}`;
+    return `http://${BASE_HOST}:${ports[agentName]}${path}`;
+}
+
+let token = localStorage.getItem('token');
+let username = localStorage.getItem('username');
+let refreshTimer = null;
+let sessionsPage = 0;
+const PAGE_SIZE = 25;
+
+// --- Auth ---
+function showAuth() { document.getElementById('auth-modal').classList.remove('hidden'); }
+function hideAuth() { document.getElementById('auth-modal').classList.add('hidden'); }
+
+async function doLogin() {
+    const u = document.getElementById('auth-username').value.trim();
+    const p = document.getElementById('auth-password').value;
+    const errEl = document.getElementById('auth-error');
+    if (!u || !p) { errEl.textContent = 'Заполните все поля'; return; }
+    try {
+        // Try login on planner (any agent works, shared auth)
+        const resp = await fetch(agentUrl('planner', '/auth/login'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: u, password: p }),
+        });
+        if (!resp.ok) {
+            const e = await resp.json();
+            errEl.textContent = e.detail || 'Ошибка входа';
+            return;
+        }
+        const data = await resp.json();
+        token = data.token;
+        username = data.username;
+        localStorage.setItem('token', token);
+        localStorage.setItem('username', username);
+        hideAuth();
+        init();
+    } catch (e) {
+        errEl.textContent = 'Сервер недоступен';
+    }
+}
+
+function logout() {
+    token = null; username = null;
+    localStorage.removeItem('token');
+    localStorage.removeItem('username');
+    showAuth();
+    if (refreshTimer) clearInterval(refreshTimer);
+}
+
+// --- Helpers ---
+function formatTime(ts) {
+    if (!ts) return '—';
+    return new Date(ts * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function formatDuration(sec) {
+    if (!sec && sec !== 0) return '—';
+    if (sec < 60) return `${sec}с`;
+    if (sec < 3600) return `${Math.floor(sec/60)}м ${sec%60}с`;
+    return `${Math.floor(sec/3600)}ч ${Math.floor((sec%3600)/60)}м`;
+}
+
+async function api(path, opts = {}) {
+    const sep = path.includes('?') ? '&' : '?';
+    const url = dispatcherUrl(path) + sep + 'token=' + encodeURIComponent(token);
+    const resp = await fetch(url, opts);
+    if (resp.status === 401 || resp.status === 403) { showAuth(); throw new Error('Auth required'); }
+    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.detail || resp.statusText); }
+    return resp.json();
+}
+
+// --- Tabs ---
+function switchTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+    if (name === 'overview') loadOverview();
+    if (name === 'connections') loadConnections();
+    if (name === 'sessions') loadSessions();
+    if (name === 'users') loadUsers();
+    if (name === 'stats') loadStats();
+}
+
+// --- Overview ---
+async function loadOverview() {
+    try {
+        const [summary, conns] = await Promise.all([api('/stats/summary'), api('/connections')]);
+        document.getElementById('overview-stats').innerHTML = `
+            <div class="stat-card"><div class="value">${summary.live_connections}</div><div class="label">Live соединений</div></div>
+            <div class="stat-card"><div class="value">${summary.total_sessions}</div><div class="label">Всего сессий</div></div>
+            <div class="stat-card"><div class="value">${summary.total_messages}</div><div class="label">Всего сообщений</div></div>
+            <div class="stat-card"><div class="value">${summary.unique_users}</div><div class="label">Пользователей</div></div>
+            <div class="stat-card"><div class="value">${summary.total_tokens || 0}</div><div class="label">Токенов</div></div>
+        `;
+        renderConnectionsTable(document.querySelector('#overview-connections tbody'), conns.connections);
+    } catch (e) { console.error('Overview error:', e); }
+}
+
+// --- Connections ---
+async function loadConnections() {
+    try {
+        const data = await api('/connections');
+        renderConnectionsTable(document.querySelector('#connections-table tbody'), data.connections);
+    } catch (e) { console.error(e); }
+}
+
+function renderConnectionsTable(tbody, connections) {
+    if (!connections.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">Нет активных соединений</td></tr>';
+        return;
+    }
+    tbody.innerHTML = connections.map(c => `
+        <tr>
+            <td title="${c.session_id}">${c.session_id.substring(0, 12)}…</td>
+            <td>${esc(c.user_id)}</td>
+            <td><span class="badge ${c.agent_name}">${c.agent_name}</span></td>
+            <td>${esc(c.model || '—')}</td>
+            <td>${formatTime(c.connected_at)}</td>
+            <td>${formatDuration(c.duration_sec)}</td>
+            <td>${c.last_message_at ? formatTime(c.last_message_at) : '—'}</td>
+        </tr>
+    `).join('');
+}
+
+// --- Sessions ---
+async function loadSessions() {
+    try {
+        const params = new URLSearchParams();
+        const agent = document.getElementById('f-agent').value;
+        const status = document.getElementById('f-status').value;
+        const user = document.getElementById('f-user').value.trim();
+        if (agent) params.set('agent_name', agent);
+        if (status) params.set('status', status);
+        if (user) params.set('user_id', user);
+        params.set('limit', PAGE_SIZE);
+        params.set('offset', sessionsPage * PAGE_SIZE);
+
+        const data = await api('/sessions?' + params.toString());
+        const tbody = document.querySelector('#sessions-table tbody');
+        if (!data.sessions.length) {
+            tbody.innerHTML = '<tr><td colspan="8" class="empty">Нет сессий</td></tr>';
+        } else {
+            tbody.innerHTML = data.sessions.map(s => `
+                <tr>
+                    <td title="${s.id}" style="cursor:pointer;color:#64b5f6;" onclick="openSession('${s.id}')">${s.id.substring(0, 12)}…</td>
+                    <td>${esc(s.user_id)}</td>
+                    <td><span class="badge ${s.agent_name}">${s.agent_name}</span></td>
+                    <td>${esc(s.model || '—')}</td>
+                    <td><span class="badge ${s.status}">${s.status}</span></td>
+                    <td>${s.message_count}</td>
+                    <td>${formatTime(s.started_at)}</td>
+                    <td class="actions">
+                        <button onclick="openSession('${s.id}')">📖</button>
+                        ${s.status === 'active' ? `<button onclick="interruptSession('${s.id}')">⏹</button>` : ''}
+                        <button class="danger" onclick="deleteSession('${s.id}')">🗑</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        // Pagination
+        const totalPages = Math.ceil(data.total / PAGE_SIZE);
+        const pagDiv = document.getElementById('sessions-pagination');
+        if (totalPages <= 1) { pagDiv.innerHTML = ''; return; }
+        let html = '';
+        html += `<button ${sessionsPage === 0 ? 'disabled' : ''} onclick="sessionsPage--;loadSessions()">◀</button>`;
+        for (let i = 0; i < totalPages && i < 10; i++) {
+            html += `<button class="${i === sessionsPage ? 'active' : ''}" onclick="sessionsPage=${i};loadSessions()">${i + 1}</button>`;
+        }
+        html += `<button ${sessionsPage >= totalPages - 1 ? 'disabled' : ''} onclick="sessionsPage++;loadSessions()">▶</button>`;
+        pagDiv.innerHTML = html;
+    } catch (e) { console.error(e); }
+}
+
+async function openSession(id) {
+    try {
+        const data = await api(`/sessions/${id}?messages=true`);
+        const s = data.session;
+        document.getElementById('modal-title').textContent = `Сессия: ${s.id.substring(0, 16)}…`;
+        document.getElementById('modal-meta').innerHTML =
+            `Пользователь: <b>${esc(s.user_id)}</b> · Агент: <b>${s.agent_name}</b> · Модель: ${esc(s.model || '—')} · Статус: <span class="badge ${s.status}">${s.status}</span> · Сообщений: ${s.message_count} · Начало: ${formatTime(s.started_at)}${s.ended_at ? ' · Конец: ' + formatTime(s.ended_at) : ''}`;
+        const msgs = data.messages || [];
+        const container = document.getElementById('modal-messages');
+        if (!msgs.length) {
+            container.innerHTML = '<div class="empty">Нет сообщений</div>';
+        } else {
+            container.innerHTML = msgs.map(m => {
+                let cls = m.role;
+                let content = '';
+                if (m.role === 'tool_call') {
+                    content = `🔧 ${esc(m.tool_name || '')}(${esc(m.tool_args || '')})`;
+                } else if (m.role === 'tool_result') {
+                    content = `✅ ${esc(m.tool_name || '')}: ${esc(m.content || '')}`;
+                } else {
+                    content = esc(m.content || '');
+                }
+                return `<div class="msg-item ${cls}">${content}<div class="msg-meta">${formatTime(m.timestamp)}</div></div>`;
+            }).join('');
+        }
+        document.getElementById('session-modal').classList.remove('hidden');
+    } catch (e) { alert('Ошибка загрузки сессии: ' + e.message); }
+}
+
+function closeSessionModal() {
+    document.getElementById('session-modal').classList.add('hidden');
+}
+
+async function deleteSession(id) {
+    if (!confirm(`Удалить сессию ${id.substring(0, 12)}…?`)) return;
+    try {
+        await api(`/sessions/${id}`, { method: 'DELETE' });
+        loadSessions();
+    } catch (e) { alert('Ошибка: ' + e.message); }
+}
+
+async function interruptSession(id) {
+    if (!confirm(`Прервать сессию ${id.substring(0, 12)}…?`)) return;
+    try {
+        await api(`/sessions/${id}/interrupt`, { method: 'POST' });
+        loadSessions();
+    } catch (e) { alert('Ошибка: ' + e.message); }
+}
+
+// --- Users ---
+async function loadUsers() {
+    try {
+        const data = await api('/users');
+        const tbody = document.querySelector('#users-table tbody');
+        if (!data.users.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="empty">Нет данных</td></tr>';
+            return;
+        }
+        tbody.innerHTML = data.users.map(u => `
+            <tr>
+                <td>${esc(u.user_id)}</td>
+                <td>${u.sessions}</td>
+                <td>${u.messages || 0}</td>
+                <td>${u.tokens || 0}</td>
+                <td>${formatTime(u.last_active)}</td>
+                <td class="actions">
+                    <button onclick="document.getElementById('f-user').value='${esc(u.user_id)}';switchTab('sessions');loadSessions();">📋 Сессии</button>
+                    <button class="danger" onclick="deleteUser('${esc(u.user_id)}')">🗑</button>
+                </td>
+            </tr>
+        `).join('');
+    } catch (e) { console.error(e); }
+}
+
+async function deleteUser(name) {
+    if (!confirm(`Удалить ВСЕ данные сессий пользователя "${name}"?`)) return;
+    try {
+        await api(`/users/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        loadUsers();
+    } catch (e) { alert('Ошибка: ' + e.message); }
+}
+
+// --- Stats ---
+async function loadStats() {
+    try {
+        const by = document.getElementById('stats-by').value;
+        const data = await api(`/stats/usage?by=${by}`);
+        const table = document.getElementById('stats-table');
+        const thead = table.querySelector('thead tr');
+        const tbody = table.querySelector('tbody');
+        const items = data.data || [];
+
+        if (by === 'daily') {
+            thead.innerHTML = '<th>День</th><th>Сессий</th><th>Сообщений</th><th>Пользователей</th>';
+            tbody.innerHTML = items.map(d => `<tr><td>${d.day}</td><td>${d.sessions}</td><td>${d.messages || 0}</td><td>${d.users || 0}</td></tr>`).join('');
+        } else if (by === 'agent') {
+            thead.innerHTML = '<th>Агент</th><th>Сессий</th><th>Сообщений</th><th>Токенов</th>';
+            tbody.innerHTML = items.map(d => `<tr><td><span class="badge ${d.agent_name}">${d.agent_name}</span></td><td>${d.sessions}</td><td>${d.messages || 0}</td><td>${d.tokens || 0}</td></tr>`).join('');
+        } else if (by === 'model') {
+            thead.innerHTML = '<th>Модель</th><th>Сессий</th><th>Сообщений</th><th>Токенов</th>';
+            tbody.innerHTML = items.map(d => `<tr><td>${esc(d.model || '—')}</td><td>${d.sessions}</td><td>${d.messages || 0}</td><td>${d.tokens || 0}</td></tr>`).join('');
+        } else if (by === 'user') {
+            thead.innerHTML = '<th>Пользователь</th><th>Сессий</th><th>Сообщений</th><th>Токенов</th><th>Послед. актив.</th>';
+            tbody.innerHTML = items.map(d => `<tr><td>${esc(d.user_id)}</td><td>${d.sessions}</td><td>${d.messages || 0}</td><td>${d.tokens || 0}</td><td>${formatTime(d.last_active)}</td></tr>`).join('');
+        }
+        if (!items.length) tbody.innerHTML = `<tr><td colspan="5" class="empty">Нет данных</td></tr>`;
+    } catch (e) { console.error(e); }
+}
+
+// --- Escape HTML ---
+function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+}
+
+// --- Init ---
+function init() {
+    document.getElementById('user-info').textContent = username || '';
+    loadOverview();
+    // Auto-refresh connections every 5s
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => {
+        const activeTab = document.querySelector('.tab.active')?.dataset.tab;
+        if (activeTab === 'overview') loadOverview();
+        if (activeTab === 'connections') loadConnections();
+    }, 5000);
+}
+
+// --- Startup ---
+if (token && username) {
+    hideAuth();
+    init();
+} else {
+    showAuth();
+}
+</script>
+</body>
+</html>

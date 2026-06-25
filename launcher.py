@@ -60,6 +60,27 @@ def start_web_server() -> subprocess.Popen:
     return proc
 
 
+def start_dispatcher(config: dict) -> subprocess.Popen:
+    """Start the dispatcher admin service."""
+    dispatcher_cfg = config.get("dispatcher", {})
+    port = dispatcher_cfg.get("port", 8005)
+    log_file = BASE_DIR / "logs" / "dispatcher.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    proc = subprocess.Popen(
+        [sys.executable, str(BASE_DIR / "dispatcher.py")],
+        cwd=str(BASE_DIR),
+        stdout=open(log_file, "a"),
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
+    print(f"  [dispatcher] started (pid={proc.pid}, port={port}, log={log_file})")
+    return proc
+
+
 def health_check(port: int, timeout: float = 5.0) -> bool:
     """Check if an agent is responding."""
     import urllib.request
@@ -91,6 +112,12 @@ def main():
     web_proc = start_web_server()
     processes["_web"] = {"proc": web_proc, "config": {"port": WEB_PORT}}
 
+    # Start dispatcher
+    print("\nStarting dispatcher:")
+    disp_proc = start_dispatcher(config)
+    dispatcher_cfg = config.get("dispatcher", {})
+    processes["dispatcher"] = {"proc": disp_proc, "config": dispatcher_cfg}
+
     # Wait a bit, then check health
     print("\nWaiting for agents to initialize...")
     time.sleep(3)
@@ -104,11 +131,19 @@ def main():
         if not ok:
             all_ok = False
 
-    print(f"\n{'All agents online!' if all_ok else 'Some agents failed to start — check logs/'}")
-    print(f"\n  Web Chat:  http://localhost:{WEB_PORT}")
+    # Check dispatcher health
+    disp_port = dispatcher_cfg.get("port", 8005)
+    disp_ok = health_check(disp_port)
+    print(f"  [dispatcher] {'✓ online' if disp_ok else '✗ offline'}")
+    if not disp_ok:
+        all_ok = False
+
+    print(f"\n{'All services online!' if all_ok else 'Some services failed to start — check logs/'}")
+    print(f"\n  Web Chat:    http://localhost:{WEB_PORT}")
     for agent_cfg in agents:
         print(f"  {agent_cfg['name']:12s} API: http://localhost:{agent_cfg['port']}")
-    print(f"\n  Logs:      {BASE_DIR / 'logs/'}")
+    print(f"  {'dispatcher':12s} API: http://localhost:{disp_port}")
+    print(f"\n  Logs:        {BASE_DIR / 'logs/'}")
     print("\nPress Ctrl+C to stop all agents.")
 
     # Handle graceful shutdown
@@ -136,9 +171,12 @@ def main():
         time.sleep(10)
         for name, info in processes.items():
             proc = info["proc"]
-            if proc.poll() is not None and name != "_web":
+            if proc.poll() is not None and name not in ("_web",):
                 print(f"\n  WARNING: [{name}] died (exit={proc.returncode}), restarting...")
-                new_proc = start_agent(info["config"])
+                if name == "dispatcher":
+                    new_proc = start_dispatcher(config)
+                else:
+                    new_proc = start_agent(info["config"])
                 processes[name]["proc"] = new_proc
 
 
