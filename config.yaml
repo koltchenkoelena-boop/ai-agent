@@ -1,0 +1,66 @@
+# Multi-Agent System Configuration
+# 4 parallel agents, each with own API/chat endpoint
+# LLM: Qwen 235B via Gonka cloud API
+
+shared:
+  public_dir: ./shared
+  tasks_dir: ./shared/tasks
+  results_dir: ./shared/results
+  mailbox_dir: ./shared/mailbox
+  context_dir: ./shared/context
+
+llm_defaults:
+  base_url: https://gate.joingonka.ai/v1
+  model: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+  fallback_model: moonshotai/Kimi-K2.6
+  api_key: jg-5f1b57b4e9959831b1bc4ea243258a21d4a56ff572103391f217c8d1262d85f8
+
+agents:
+  - name: planner
+    description: "Планировщик задач и координатор"
+    port: 8001
+    sandbox_dir: ./sandbox/planner
+    system_prompt: |
+      Ты — агент-планировщик. Твоя задача — декомпозировать сложные задачи
+      на подзадачи и распределять их между другими агентами.
+      Ты можешь писать задачи в shared/tasks/ для других агентов.
+    tools:
+      - shell
+      - filesystem
+      - delegate_task
+
+  - name: coder
+    description: "Разработчик — пишет и редактирует код"
+    port: 8002
+    sandbox_dir: ./sandbox/coder
+    system_prompt: |
+      Ты — агент-разработчик. Пишешь код, исправляешь баги, создаёшь файлы.
+      Работаешь в своей песочнице. Результаты кладёшь в shared/results/.
+    tools:
+      - shell
+      - filesystem
+      - code_execute
+
+  - name: researcher
+    description: "Исследователь — поиск, анализ, RAG"
+    port: 8003
+    sandbox_dir: ./sandbox/researcher
+    system_prompt: |
+      Ты — агент-исследователь. Ищешь информацию, анализируешь документы,
+      отвечаешь на вопросы. Результаты анализа кладёшь в shared/context/.
+    tools:
+      - web_search
+      - filesystem
+      - read_documents
+
+  - name: reviewer
+    description: "Ревьюер — проверяет результаты, тесты, качество"
+    port: 8004
+    sandbox_dir: ./sandbox/reviewer
+    system_prompt: |
+      Ты — агент-ревьюер. Проверяешь код и результаты других агентов.
+      Запускаешь тесты, находишь проблемы. Пишешь отзывы в shared/mailbox/.
+    tools:
+      - shell
+      - filesystem
+      - run_tests

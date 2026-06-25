@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Agent Chat</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+        }
+        .sidebar {
+            width: 240px;
+            background: #16213e;
+            border-right: 1px solid #0f3460;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+        }
+        .sidebar h2 { color: #e94560; margin-bottom: 16px; font-size: 18px; }
+        .agent-btn {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 8px;
+            background: #0f3460;
+            border: 1px solid #1a1a4e;
+            border-radius: 8px;
+            color: #eee;
+            cursor: pointer;
+            text-align: left;
+            transition: all 0.2s;
+        }
+        .agent-btn:hover { background: #1a1a6e; }
+        .agent-btn.active { background: #e94560; border-color: #e94560; }
+        .agent-btn .agent-name { font-weight: 600; }
+        .agent-btn .agent-desc { font-size: 11px; opacity: 0.7; margin-top: 4px; }
+        .agent-btn .agent-status {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #666;
+            margin-right: 6px;
+        }
+        .agent-btn .agent-status.online { background: #4caf50; }
+
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .chat-header {
+            padding: 16px 24px;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .chat-header h3 { color: #e94560; }
+        .chat-header .model-tag {
+            background: #0f3460;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .message {
+            max-width: 75%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .message.user {
+            align-self: flex-end;
+            background: #0f3460;
+        }
+        .message.assistant {
+            align-self: flex-start;
+            background: #1a1a4e;
+            border: 1px solid #2a2a5e;
+        }
+        .message.streaming { border-color: #e94560; }
+        .message code {
+            background: #0a0a1e;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .message pre {
+            background: #0a0a1e;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 8px 0;
+            overflow-x: auto;
+        }
+
+        .input-area {
+            padding: 16px 24px;
+            background: #16213e;
+            border-top: 1px solid #0f3460;
+            display: flex;
+            gap: 12px;
+        }
+        .input-area textarea {
+            flex: 1;
+            background: #0f3460;
+            border: 1px solid #1a1a4e;
+            border-radius: 8px;
+            color: #eee;
+            padding: 12px;
+            font-size: 14px;
+            resize: none;
+            min-height: 44px;
+            max-height: 120px;
+            font-family: inherit;
+        }
+        .input-area textarea:focus { outline: none; border-color: #e94560; }
+        .input-area button {
+            background: #e94560;
+            border: none;
+            border-radius: 8px;
+            color: white;
+            padding: 12px 20px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        .input-area button:hover { background: #d63851; }
+        .input-area button:disabled { background: #666; cursor: not-allowed; }
+
+        .connection-status {
+            font-size: 11px;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        .connection-status.connected { color: #4caf50; }
+        .connection-status.disconnected { color: #f44336; }
+
+        /* Auth */
+        .auth-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .auth-form {
+            background: #16213e;
+            padding: 32px;
+            border-radius: 16px;
+            width: 340px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .auth-form h2 { color: #e94560; text-align: center; }
+        .auth-form input {
+            background: #0f3460;
+            border: 1px solid #1a1a4e;
+            border-radius: 8px;
+            color: #eee;
+            padding: 12px;
+            font-size: 14px;
+        }
+        .auth-form input:focus { outline: none; border-color: #e94560; }
+        .auth-buttons { display: flex; gap: 8px; }
+        .auth-buttons button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            background: #e94560;
+            color: white;
+        }
+        .auth-buttons button.secondary { background: #0f3460; }
+        .auth-error { color: #f44336; font-size: 13px; text-align: center; min-height: 20px; }
+        .auth-modal.hidden { display: none; }
+
+        .sidebar-footer {
+            margin-top: auto;
+            padding-top: 16px;
+            border-top: 1px solid #0f3460;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .sidebar-footer #username-display {
+            font-size: 13px;
+            font-weight: 600;
+            color: #eee;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .logout-btn {
+            background: #0f3460;
+            border: 1px solid #1a1a4e;
+            border-radius: 8px;
+            color: #eee;
+            padding: 6px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+        .logout-btn:hover { background: #1a1a6e; }
+    </style>
+</head>
+<body>
+    <div id="auth-modal" class="auth-modal hidden">
+        <div class="auth-form">
+            <h2>Multi-Agent Chat</h2>
+            <input type="text" id="auth-username" placeholder="Имя пользователя" autocomplete="username">
+            <input type="password" id="auth-password" placeholder="Пароль" autocomplete="current-password"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();doLogin();}">
+            <div class="auth-buttons">
+                <button onclick="doLogin()">Войти</button>
+                <button onclick="doSignup()" class="secondary">Регистрация</button>
+            </div>
+            <div id="auth-error" class="auth-error"></div>
+        </div>
+    </div>
+    <div class="sidebar">
+        <h2>Agents</h2>
+        <div id="agent-list"></div>
+        <div class="sidebar-footer">
+            <span id="username-display"></span>
+            <button class="logout-btn" onclick="logout()">Выйти</button>
+        </div>
+    </div>
+    <div class="chat-area">
+        <div class="chat-header">
+            <div>
+                <h3 id="current-agent-name">Select an agent</h3>
+                <span class="connection-status disconnected" id="conn-status">disconnected</span>
+            </div>
+            <span class="model-tag" id="current-model">—</span>
+        </div>
+        <div class="messages" id="messages"></div>
+        <div class="input-area">
+            <textarea id="input" placeholder="Type a message..." rows="1"
+                      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"></textarea>
+            <button id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+    <script>
+    const AGENTS = [
+        { name: 'planner', port: 8001, desc: 'Планировщик задач' },
+        { name: 'coder', port: 8002, desc: 'Разработчик кода' },
+        { name: 'researcher', port: 8003, desc: 'Исследователь' },
+        { name: 'reviewer', port: 8004, desc: 'Ревьюер' },
+    ];
+
+    let currentAgent = null;
+    let ws = null;
+    let sessionId = localStorage.getItem('session_id') || crypto.randomUUID();
+    localStorage.setItem('session_id', sessionId);
+    let streamingMsg = null;
+
+    // Determine base host (for remote access)
+    const BASE_HOST = window.location.hostname;
+
+    // ---- Auth ----
+    function showAuthModal() {
+        document.getElementById('auth-modal').classList.remove('hidden');
+        document.getElementById('auth-username').focus();
+    }
+
+    function hideAuthModal() {
+        document.getElementById('auth-modal').classList.add('hidden');
+        document.getElementById('auth-error').textContent = '';
+    }
+
+    function authHeaders() {
+        return { 'Content-Type': 'application/json' };
+    }
+
+    async function doAuth(endpoint) {
+        const username = document.getElementById('auth-username').value.trim();
+        const password = document.getElementById('auth-password').value;
+        const errEl = document.getElementById('auth-error');
+        errEl.textContent = '';
+        if (!username || !password) {
+            errEl.textContent = 'Введите имя и пароль';
+            return;
+        }
+        // авторизация через первый агент (токен кросс-агентный)
+        const port = AGENTS[0].port;
+        try {
+            const resp = await fetch(`http://${BASE_HOST}:${port}/auth/${endpoint}`, {
+                method: 'POST',
+                headers: authHeaders(),
+                body: JSON.stringify({ username, password })
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                errEl.textContent = data.detail || 'Ошибка авторизации';
+                return;
+            }
+            localStorage.setItem('auth_token', data.token);
+            localStorage.setItem('auth_username', data.username);
+            document.getElementById('auth-password').value = '';
+            hideAuthModal();
+            startApp();
+        } catch (e) {
+            errEl.textContent = 'Сервер недоступен';
+        }
+    }
+
+    function doLogin() { doAuth('login'); }
+    function doSignup() { doAuth('signup'); }
+
+    function logout() {
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('auth_username');
+        if (ws) ws.close();
+        document.getElementById('messages').innerHTML = '';
+        document.getElementById('username-display').textContent = '';
+        showAuthModal();
+    }
+
+    async function checkAuth() {
+        const token = localStorage.getItem('auth_token');
+        if (!token) return false;
+        try {
+            const resp = await fetch(`http://${BASE_HOST}:${AGENTS[0].port}/auth/me?token=${encodeURIComponent(token)}`,
+                { signal: AbortSignal.timeout(3000) });
+            if (resp.status === 401) {
+                localStorage.removeItem('auth_token');
+                return false;
+            }
+            return resp.ok;
+        } catch (e) {
+            // сервер недоступен — пускаем по сохранённому токену
+            return true;
+        }
+    }
+
+    async function init() {
+        if (await checkAuth()) {
+            startApp();
+        } else {
+            showAuthModal();
+        }
+    }
+
+    function startApp() {
+        const username = localStorage.getItem('auth_username');
+        document.getElementById('username-display').textContent = username || '';
+
+        const list = document.getElementById('agent-list');
+        list.innerHTML = '';
+        AGENTS.forEach(agent => {
+            const btn = document.createElement('button');
+            btn.className = 'agent-btn';
+            btn.innerHTML = `
+                <span class="agent-status" id="status-${agent.name}"></span>
+                <span class="agent-name">${agent.name}</span>
+                <div class="agent-desc">${agent.desc}</div>
+            `;
+            btn.onclick = () => selectAgent(agent);
+            list.appendChild(btn);
+        });
+
+        // Check health of all agents
+        AGENTS.forEach(checkHealth);
+    }
+
+    async function checkHealth(agent) {
+        try {
+            const resp = await fetch(`http://${BASE_HOST}:${agent.port}/health`, { signal: AbortSignal.timeout(3000) });
+            if (resp.ok) {
+                document.getElementById(`status-${agent.name}`).classList.add('online');
+            }
+        } catch (e) {
+            // Agent offline
+        }
+    }
+
+    function selectAgent(agent) {
+        currentAgent = agent;
+        // сессия одна на всё время вкладки — НЕ сбрасываем при смене агента
+
+        // Update UI
+        document.querySelectorAll('.agent-btn').forEach(b => b.classList.remove('active'));
+        event.currentTarget.classList.add('active');
+        document.getElementById('current-agent-name').textContent = agent.name;
+        document.getElementById('messages').innerHTML = '';
+
+        // Fetch model info
+        fetch(`http://${BASE_HOST}:${agent.port}/info`)
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('current-model').textContent = data.model;
+            })
+            .catch(() => {
+                document.getElementById('current-model').textContent = 'offline';
+            });
+
+        connectWebSocket(agent);
+    }
+
+    function connectWebSocket(agent) {
+        if (ws) ws.close();
+
+        const token = localStorage.getItem('auth_token');
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${BASE_HOST}:${agent.port}/ws/${sessionId}?token=${encodeURIComponent(token)}`);
+
+        ws.onopen = () => {
+            document.getElementById('conn-status').textContent = 'connected';
+            document.getElementById('conn-status').className = 'connection-status connected';
+        };
+
+        ws.onclose = (event) => {
+            document.getElementById('conn-status').textContent = 'disconnected';
+            document.getElementById('conn-status').className = 'connection-status disconnected';
+            if (event.code === 4001) {
+                // unauthorized — сбрасываем токен и показываем логин
+                localStorage.removeItem('auth_token');
+                showAuthModal();
+            }
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'chunk') {
+                if (!streamingMsg) {
+                    streamingMsg = addMessage('', 'assistant');
+                    streamingMsg.classList.add('streaming');
+                }
+                streamingMsg.textContent += data.content;
+                scrollToBottom();
+            } else if (data.type === 'tool_result') {
+                if (streamingMsg) {
+                    streamingMsg.innerHTML += `<pre><code>${escapeHtml(data.content)}</code></pre>`;
+                    scrollToBottom();
+                }
+            } else if (data.type === 'done') {
+                if (streamingMsg) {
+                    streamingMsg.classList.remove('streaming');
+                    streamingMsg = null;
+                }
+                document.getElementById('send-btn').disabled = false;
+            }
+        };
+    }
+
+    function sendMessage() {
+        const input = document.getElementById('input');
+        const text = input.value.trim();
+        if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+        addMessage(text, 'user');
+        ws.send(JSON.stringify({ content: text }));
+        input.value = '';
+        document.getElementById('send-btn').disabled = true;
+    }
+
+    function addMessage(text, role) {
+        const div = document.createElement('div');
+        div.className = `message ${role}`;
+        div.textContent = text;
+        document.getElementById('messages').appendChild(div);
+        scrollToBottom();
+        return div;
+    }
+
+    function scrollToBottom() {
+        const msgs = document.getElementById('messages');
+        msgs.scrollTop = msgs.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    init();
+    </script>
+</body>
+</html>

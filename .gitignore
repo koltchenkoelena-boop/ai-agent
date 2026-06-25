@@ -1,0 +1,17 @@
+# secrets / local env
+.env
+*.key
+
+# qwen-code per-project + worktrees
+.qwen/
+
+# runtime state
+sandbox/
+logs/
+pids/
+*.pid
+__pycache__/
+*.pyc
+myenv/
+venv/
+.venv/
