@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y ca-certificates curl && \
 
 WORKDIR /app
 COPY target/release/ai-agent /app/ai-agent
+COPY static /app/static
+
+ENV AI_AGENT_STATIC_DIR=/app/static
 
 EXPOSE 8080
 

@@ -239,8 +239,13 @@ pub fn start_frontend_server() -> (
         safety_tx,
     };
 
-    let static_dir =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
+    // Путь к статике: env var AI_AGENT_STATIC_DIR, иначе — compile-time Cargo manifest dir.
+    // В Docker задаётся через ENV AI_AGENT_STATIC_DIR=/app/static
+    let static_dir = std::env::var("AI_AGENT_STATIC_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static")
+        });
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .fallback_service(get_service(
