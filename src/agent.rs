@@ -6,10 +6,12 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 
 use crate::context::ContextManager;
+use crate::hooks::{PostToolHook, PreToolHook};
 use crate::provider::{ModelProvider, ProviderError};
 use crate::safety::{default_pipeline, SafetyDecision, SafetyPipeline};
 use crate::tool_routing::{AsyncTool, ToolKind, ToolRouter};
@@ -178,17 +180,21 @@ impl AsyncTool for DummyTool {
 // Agent
 // ===========================================================================
 
-/// Главный цикл агента. Оркестрирует: LLM → Safety → Tool Router.
+/// Главный цикл агента. Оркестрирует: LLM → Safety → Hooks → Tool Router.
 pub struct Agent<P: ModelProvider> {
     pub provider: P,
     pub context: ContextManager,
     pub router: ToolRouter,
     pub safety: SafetyPipeline,
+    /// PreToolHook — блокирующие хуки, вызываемые после Safety, до ToolRouter.
+    pub pre_hooks: Vec<Box<dyn PreToolHook>>,
+    /// PostToolHook — фоновые хуки, вызываемые после ToolRouter (fire-and-forget).
+    pub post_hooks: Vec<Arc<dyn PostToolHook>>,
 }
 
 impl<P: ModelProvider> Agent<P> {
     /// Создать агента с переданным провайдером, пустым контекстом,
-    /// пайплайном безопасности по умолчанию и dummy-тулом.
+    /// пайплайном безопасности по умолчанию, пустыми списками хуков и dummy-тулом.
     pub fn new(provider: P) -> Self {
         let mut router = ToolRouter::new();
         router.register(Box::new(DummyTool::new("dummy")));
@@ -197,6 +203,8 @@ impl<P: ModelProvider> Agent<P> {
             context: ContextManager::new(),
             router,
             safety: default_pipeline(),
+            pre_hooks: Vec::new(),
+            post_hooks: Vec::new(),
         }
     }
 
@@ -240,6 +248,18 @@ impl<P: ModelProvider> Agent<P> {
         }
     }
 
+    /// Зарегистрировать PreToolHook.
+    pub fn add_pre_hook(&mut self, hook: Box<dyn PreToolHook>) {
+        tracing::debug!("registered PreToolHook");
+        self.pre_hooks.push(hook);
+    }
+
+    /// Зарегистрировать PostToolHook.
+    pub fn add_post_hook(&mut self, hook: Arc<dyn PostToolHook>) {
+        tracing::debug!("registered PostToolHook");
+        self.post_hooks.push(hook);
+    }
+
     /// Один шаг (итерация) цикла агента.
     ///
     /// 1. Запрос к LLM (stream_chat с текущим контекстом и определениями тулов)
@@ -280,9 +300,9 @@ impl<P: ModelProvider> Agent<P> {
 
         // --- Шаг 5: обработка тулов ---
         let last_msg = self.context.current_messages().last().unwrap();
-        let tool_calls = last_msg.tool_calls.as_ref().unwrap().clone();
+        let mut tool_calls = last_msg.tool_calls.as_ref().unwrap().clone();
 
-        for call in &tool_calls {
+        for call in &mut tool_calls {
             // Safety
             let decision = self
                 .safety
@@ -311,8 +331,34 @@ impl<P: ModelProvider> Agent<P> {
                 }
             }
 
+            // PreToolHook — последовательный вызов всех pre_hooks
+            for hook in &self.pre_hooks {
+                if let Err(reason) = hook.on_pre_use(call, self.context.current_messages()).await {
+                    return Err(AgentError::ToolExecution(format!(
+                        "PreToolHook rejected call '{}': {reason}",
+                        call.function.name
+                    )));
+                }
+            }
+
             // Исполнение
-            match self.router.route(call).await {
+            let result = self.router.route(call).await;
+
+            // PostToolHook — fire-and-forget через tokio::spawn
+            for hook in &self.post_hooks {
+                let call_clone = call.clone();
+                let result_clone = match &result {
+                    Ok(msg) => Ok(msg.content.clone().unwrap_or_default()),
+                    Err(e) => Err(e.clone()),
+                };
+                let ctx_clone = self.context.current_messages().to_vec();
+                let hook = Arc::clone(hook);
+                tokio::spawn(async move {
+                    hook.on_post_use(&call_clone, &result_clone, &ctx_clone).await;
+                });
+            }
+
+            match result {
                 Ok(msg) => {
                     self.context.push(msg);
                 }
