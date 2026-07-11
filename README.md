@@ -39,6 +39,7 @@
 | 2 | **Context Manager** | ✅ | Git-like branching: create, switch, merge (Overwrite/FastForward/Union), snapshot, авто-компакция |
 | 3 | **MCP Transport** | ✅ | Docker exec + JSON-RPC 2.0: initialize → tools/list → tools/call |
 | 4 | **Tool Routing** | ✅ | ToolRouter, AsyncTool trait, ToolKind (Platform/Frontend/Mcp) |
+| 4.1 | **Platform Tools** | ✅ | read_file, write_file, glob, grep — нативные async инструменты для работы с ФС |
 | 5 | **Safety Pipeline** | ✅ | 5 stages: Security → Egress → Adversary → Permission → Repetition |
 | 6 | **Hooks** | ✅ | PreToolUse (блокирующий) + PostToolUse (fire-and-forget через tokio::spawn) |
 | 7 | **Auto-compaction** | ✅ | CompactionConfig, needs_compaction, compact, скрытый LLM вызов |
@@ -74,7 +75,7 @@ tokio, async-trait, futures-util, tokio-util, reqwest, async-stream, serde, serd
 
 ```
 cargo test --lib
-# 42 теста: context (19), safety (14), agent (3), tool_routing (3), hooks (2)
+# 53 теста: context (19), safety (14), agent (3), tool_routing (3), hooks (2), platform (12)
 ```
 
 ## Лицензия
