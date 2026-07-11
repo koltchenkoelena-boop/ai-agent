@@ -9,11 +9,13 @@ use futures_util::StreamExt;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::context::ContextManager;
 use crate::hooks::{PostToolHook, PreToolHook};
 use crate::provider::{ModelProvider, ProviderError};
 use crate::safety::{default_pipeline, SafetyDecision, SafetyPipeline};
+use crate::tool_routing::frontend::{ClientCommand, FrontendEvent};
 use crate::tool_routing::platform::register_platform_tools;
 use crate::tool_routing::{AsyncTool, ToolKind, ToolRouter};
 use crate::types::*;
@@ -191,6 +193,10 @@ pub struct Agent<P: ModelProvider> {
     pub pre_hooks: Vec<Box<dyn PreToolHook>>,
     /// PostToolHook — фоновые хуки, вызываемые после ToolRouter (fire-and-forget).
     pub post_hooks: Vec<Arc<dyn PostToolHook>>,
+    /// Отправитель событий фронтенду (broadcast-канал WebSocket).
+    pub frontend_tx: Option<broadcast::Sender<FrontendEvent>>,
+    /// Получатель команд от фронтенда (mpsc-канал из WebSocket).
+    pub safety_approval_rx: Option<mpsc::Receiver<ClientCommand>>,
 }
 
 impl<P: ModelProvider> Agent<P> {
@@ -207,6 +213,8 @@ impl<P: ModelProvider> Agent<P> {
             safety: default_pipeline(),
             pre_hooks: Vec::new(),
             post_hooks: Vec::new(),
+            frontend_tx: None,
+            safety_approval_rx: None,
         }
     }
 
@@ -260,6 +268,16 @@ impl<P: ModelProvider> Agent<P> {
     pub fn add_post_hook(&mut self, hook: Arc<dyn PostToolHook>) {
         tracing::debug!("registered PostToolHook");
         self.post_hooks.push(hook);
+    }
+
+    /// Установить отправитель событий фронтенду.
+    pub fn set_frontend_tx(&mut self, tx: broadcast::Sender<FrontendEvent>) {
+        self.frontend_tx = Some(tx);
+    }
+
+    /// Установить получатель команд от фронтенда (для safety approval).
+    pub fn set_safety_approval_rx(&mut self, rx: mpsc::Receiver<ClientCommand>) {
+        self.safety_approval_rx = Some(rx);
     }
 
     /// Один шаг (итерация) цикла агента.
@@ -332,19 +350,53 @@ impl<P: ModelProvider> Agent<P> {
                         reason = %reason,
                         "[SAFETY] Requires approval"
                     );
+
+                    // Отправить событие фронтенду
+                    if let Some(ref tx) = self.frontend_tx {
+                        let _ = tx.send(FrontendEvent::SafetyReviewRequired {
+                            tool_name: call.function.name.clone(),
+                            reason: reason.clone(),
+                        });
+                    }
+
+                    // CLI-приглашение (всегда)
                     println!("\n⚠️  Requires approval: {reason}");
                     print!("Proceed? (Y/n): ");
                     use std::io::Write;
                     std::io::stdout().flush()?;
 
-                    let mut input = String::new();
-                    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-                    reader.read_line(&mut input).await?;
-                    let input = input.trim().to_lowercase();
-                    if input == "n" || input == "no" {
+                    // Выбор канала получения ответа
+                    let approved = if let Some(ref mut rx) = self.safety_approval_rx {
+                        tokio::select! {
+                            cmd = rx.recv() => {
+                                match cmd {
+                                    Some(ClientCommand::SafetyResponse { approved }) => approved,
+                                    _ => false,
+                                }
+                            }
+                            input = async {
+                                let mut buf = String::new();
+                                let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+                                reader.read_line(&mut buf).await.ok()?;
+                                Some(buf.trim().to_lowercase())
+                            } => {
+                                match input {
+                                    Some(s) => s != "n" && s != "no",
+                                    None => false,
+                                }
+                            }
+                        }
+                    } else {
+                        // Нет фронтенда — только stdin
+                        let mut input = String::new();
+                        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+                        reader.read_line(&mut input).await?;
+                        input.trim().to_lowercase() != "n" && input.trim().to_lowercase() != "no"
+                    };
+
+                    if !approved {
                         return Err(AgentError::UserAbort);
                     }
-                    // Иначе — продолжаем
                 }
             }
 

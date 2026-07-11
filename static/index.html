@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Agent Cluster</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+
+  * { scrollbar-width: thin; scrollbar-color: #1e293b transparent; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #334155; }
+
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  @keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0.4); }
+    70% { box-shadow: 0 0 0 8px rgba(5, 150, 105, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(5, 150, 105, 0); }
+  }
+  .pulse-emerald { animation: pulse-ring 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+  @keyframes pulse-amber {
+    0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+    70% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+  }
+  .pulse-amber { animation: pulse-amber 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(24px) scale(0.96); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .animate-slide-up { animation: slideUp 0.25s ease-out; }
+
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  .shimmer-bar {
+    background: linear-gradient(90deg, transparent 0%, rgba(16, 185, 129, 0.15) 50%, transparent 100%);
+    background-size: 200% 100%;
+    animation: shimmer 3s ease-in-out infinite;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .event-enter { animation: fadeIn 0.2s ease-out; }
+
+  @keyframes dotPulse {
+    0%, 80%, 100% { opacity: 0.3; }
+    40% { opacity: 1; }
+  }
+  .dot-pulse > span:nth-child(1) { animation: dotPulse 1.4s infinite; animation-delay: 0s; }
+  .dot-pulse > span:nth-child(2) { animation: dotPulse 1.4s infinite; animation-delay: 0.2s; }
+  .dot-pulse > span:nth-child(3) { animation: dotPulse 1.4s infinite; animation-delay: 0.4s; }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
+
+<!-- ====== TOP NAV BAR ====== -->
+<header class="h-12 shrink-0 flex items-center justify-between px-4 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md z-30">
+  <div class="flex items-center gap-3">
+    <div class="w-7 h-7 rounded-md bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center shadow-lg shadow-emerald-500/20">
+      <i data-lucide="cpu" class="w-4 h-4 text-white"></i>
+    </div>
+    <h1 class="text-sm font-semibold tracking-tight text-slate-100">AI Agent Cluster</h1>
+    <div class="hidden sm:flex items-center gap-1.5 ml-2">
+      <span class="text-[10px] uppercase tracking-widest text-slate-600 font-medium px-2 py-0.5 rounded border border-slate-800">Rust/axum</span>
+      <span class="text-[10px] uppercase tracking-widest text-slate-600 font-medium px-2 py-0.5 rounded border border-slate-800">v0.2</span>
+    </div>
+  </div>
+  <div class="flex items-center gap-3">
+    <div id="connectionBadge" class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-red-900/30 text-red-400 border border-red-800/40">
+      <span class="w-1.5 h-1.5 rounded-full bg-red-400" id="statusDot"></span>
+      <span id="statusText">Disconnected</span>
+    </div>
+  </div>
+</header>
+
+<!-- ====== MAIN LAYOUT ====== -->
+<div class="flex flex-1 overflow-hidden">
+
+  <!-- ====== SIDEBAR ====== -->
+  <aside class="w-64 shrink-0 border-r border-slate-800 bg-slate-950 flex flex-col overflow-hidden hidden md:flex">
+    <div class="p-3 border-b border-slate-800/60">
+      <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-2">
+        <i data-lucide="git-branch" class="w-3.5 h-3.5"></i>
+        <span>Context Branches</span>
+      </div>
+      <div id="branchList" class="space-y-1 max-h-48 overflow-y-auto">
+        <div class="flex items-center gap-2 px-2 py-1.5 rounded bg-emerald-900/20 border border-emerald-800/30 text-xs text-emerald-300">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+          <span class="truncate font-medium">main</span>
+        </div>
+      </div>
+    </div>
+    <div class="p-3 border-b border-slate-800/60">
+      <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-2">
+        <i data-lucide="bot" class="w-3.5 h-3.5"></i>
+        <span>Running Agents</span>
+      </div>
+      <div id="agentList" class="space-y-1">
+        <div class="text-xs text-slate-600 italic px-2">None active</div>
+      </div>
+    </div>
+    <div class="p-3 mt-auto">
+      <div class="flex items-center gap-2 text-[11px] text-slate-600">
+        <i data-lucide="radio" class="w-3 h-3"></i>
+        <span>WS Endpoint: <span class="mono text-slate-500">/ws</span></span>
+      </div>
+      <div id="reconnectInfo" class="text-[11px] text-slate-700 mt-1 hidden">
+        Reconnecting in <span id="reconnectCountdown">3</span>s
+      </div>
+    </div>
+  </aside>
+
+  <!-- ====== MAIN CONTENT ====== -->
+  <main class="flex-1 flex flex-col min-w-0">
+
+    <!-- Mobile sidebar toggle -->
+    <div class="md:hidden flex items-center gap-2 px-3 py-2 border-b border-slate-800/60 bg-slate-900/50">
+      <button id="mobileSidebarToggle" class="p-1 rounded hover:bg-slate-800 transition-colors">
+        <i data-lucide="panel-left" class="w-4 h-4 text-slate-400"></i>
+      </button>
+      <span class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Dashboard</span>
+      <div class="ml-auto flex items-center gap-1.5">
+        <span class="w-1.5 h-1.5 rounded-full bg-red-400" id="mobileStatusDot"></span>
+        <span class="text-[10px] text-slate-500" id="mobileStatusText">Disconnected</span>
+      </div>
+    </div>
+
+    <div class="flex flex-1 flex-col lg:flex-row overflow-hidden">
+
+      <!-- ====== LEFT: EVENT STREAM ====== -->
+      <section class="flex flex-col flex-1 min-w-0 border-r-0 lg:border-r border-slate-800/60">
+        <div class="shrink-0 flex items-center justify-between px-4 py-2 border-b border-slate-800/60 bg-slate-900/30">
+          <div class="flex items-center gap-2">
+            <i data-lucide="radio" class="w-3.5 h-3.5 text-emerald-500"></i>
+            <span class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Event Stream</span>
+          </div>
+          <span id="eventCount" class="text-[10px] text-slate-600 mono">0 events</span>
+        </div>
+        <div id="eventLog" class="flex-1 overflow-y-auto p-3 space-y-1.5 mono text-[13px] leading-relaxed">
+          <div class="text-slate-600 text-[12px] flex items-center gap-2 py-8 justify-center italic">
+            <i data-lucide="radio" class="w-4 h-4 text-slate-700"></i>
+            Waiting for events...
+          </div>
+        </div>
+      </section>
+
+      <!-- ====== RIGHT: SWARM CONTROLLER ====== -->
+      <section class="flex flex-col w-full lg:w-96 shrink-0 overflow-hidden">
+        <div class="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-slate-800/60 bg-slate-900/30">
+          <i data-lucide="network" class="w-3.5 h-3.5 text-indigo-400"></i>
+          <span class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Swarm Controller</span>
+        </div>
+        <div class="p-4 border-b border-slate-800/60">
+          <label for="taskInput" class="text-[11px] uppercase tracking-wider text-slate-500 font-semibold block mb-2">New Task</label>
+          <textarea id="taskInput" rows="3"
+            class="w-full bg-slate-900 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 resize-none focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-all duration-200"
+            placeholder="Describe the task for the agent swarm..."></textarea>
+          <button id="sendTaskBtn"
+            class="mt-2 w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
+            disabled>
+            <i data-lucide="send-horizonal" class="w-4 h-4"></i>
+            Launch Swarm
+          </button>
+        </div>
+        <div class="flex-1 p-4 overflow-y-auto">
+          <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-3">
+            <i data-lucide="git-fork" class="w-3.5 h-3.5"></i>
+            <span>Branch Tree</span>
+          </div>
+          <div id="branchTree" class="space-y-1 text-xs">
+            <div class="flex items-center gap-2 py-1 text-emerald-400">
+              <i data-lucide="git-commit" class="w-3.5 h-3.5 text-emerald-500"></i>
+              <span class="font-medium">main</span>
+              <span class="text-[10px] text-slate-600 ml-auto">root</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<!-- ====== RECONNECTING OVERLAY ====== -->
+<div id="reconnectOverlay" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-40 flex items-center justify-center hidden transition-opacity duration-300">
+  <div class="flex flex-col items-center gap-3 text-slate-400">
+    <div class="flex items-center gap-1 text-2xl dot-pulse">
+      <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+      <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+      <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+    </div>
+    <span class="text-sm font-medium text-slate-300">Reconnecting...</span>
+    <span class="text-xs text-slate-600">Attempt <span id="reconnectAttempt">1</span></span>
+  </div>
+</div>
+
+<!-- ====== SAFETY REVIEW MODAL ====== -->
+<div id="safetyModal" class="fixed inset-0 z-50 flex items-center justify-center hidden">
+  <div class="absolute inset-0 bg-slate-950/70 backdrop-blur-md"></div>
+  <div class="relative z-10 w-full max-w-lg mx-4 animate-slide-up">
+    <div class="bg-slate-900 border border-amber-500/50 rounded-xl shadow-2xl shadow-amber-500/10 overflow-hidden">
+      <div class="flex items-center gap-3 px-5 py-4 border-b border-amber-500/20 bg-amber-500/5">
+        <div class="w-8 h-8 rounded-full bg-amber-500/20 flex items-center justify-center">
+          <i data-lucide="shield-alert" class="w-4 h-4 text-amber-400"></i>
+        </div>
+        <div>
+          <h2 class="text-sm font-semibold text-amber-300">Safety Review Required</h2>
+          <p class="text-[11px] text-slate-500">A tool execution needs your approval</p>
+        </div>
+      </div>
+      <div class="px-5 py-4 space-y-3">
+        <div>
+          <label class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Tool</label>
+          <p id="safetyToolName" class="text-sm font-medium text-slate-200 mt-0.5"></p>
+        </div>
+        <div>
+          <label class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Reason</label>
+          <p id="safetyReason" class="text-sm text-slate-400 mt-0.5"></p>
+        </div>
+        <div>
+          <label class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Arguments</label>
+          <pre id="safetyArgs" class="mt-1 p-3 rounded-lg bg-slate-950 border border-slate-800 text-[12px] leading-relaxed text-slate-300 overflow-x-auto max-h-40 overflow-y-auto"></pre>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-3 px-5 py-4 border-t border-slate-800/60 bg-slate-950/50">
+        <button id="safetyDenyBtn" class="px-4 py-2 rounded-lg text-sm font-medium text-slate-300 border border-slate-700/60 hover:bg-slate-800 hover:text-slate-200 transition-colors duration-150">
+          <i data-lucide="x" class="w-3.5 h-3.5 inline-block mr-1.5 -mt-0.5"></i> Deny
+        </button>
+        <button id="safetyApproveBtn" class="px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 transition-all duration-150">
+          <i data-lucide="check" class="w-3.5 h-3.5 inline-block mr-1.5 -mt-0.5"></i> Approve
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== MOBILE DRAWER ====== -->
+<div id="mobileDrawer" class="md:hidden fixed inset-0 z-30 hidden transition-opacity duration-200">
+  <div class="absolute inset-0 bg-slate-950/60 backdrop-blur-sm" id="mobileDrawerBackdrop"></div>
+  <div class="absolute left-0 top-0 bottom-0 w-64 bg-slate-950 border-r border-slate-800 shadow-2xl shadow-black/50 p-3 overflow-y-auto">
+    <div class="flex items-center justify-between mb-4">
+      <span class="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">Navigation</span>
+      <button id="mobileDrawerClose" class="p-1 rounded hover:bg-slate-800">
+        <i data-lucide="x" class="w-4 h-4 text-slate-400"></i>
+      </button>
+    </div>
+    <div class="space-y-4">
+      <div>
+        <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-2">
+          <i data-lucide="git-branch" class="w-3.5 h-3.5"></i>
+          <span>Context Branches</span>
+        </div>
+        <div id="mobileBranchList" class="space-y-1"></div>
+      </div>
+      <div>
+        <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-2">
+          <i data-lucide="bot" class="w-3.5 h-3.5"></i>
+          <span>Running Agents</span>
+        </div>
+        <div id="mobileAgentList" class="space-y-1">
+          <div class="text-xs text-slate-600 italic px-2">None active</div>
+        </div>
+      </div>
+      <div class="pt-4 border-t border-slate-800/60">
+        <div class="flex items-center gap-2 text-[11px] text-slate-600">
+          <i data-lucide="radio" class="w-3 h-3"></i>
+          <span>WS: <span class="mono text-slate-500">/ws</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ========================================================================
+//  UTILITY
+// ========================================================================
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = String(str ?? '');
+  return d.innerHTML;
+}
+function time() {
+  return new Date().toLocaleTimeString('en-US', { hour12: false });
+}
+function $(id) { return document.getElementById(id); }
+
+// ========================================================================
+//  UI REFS
+// ========================================================================
+const statusBadge         = $('connectionBadge');
+const statusDot           = $('statusDot');
+const statusText          = $('statusText');
+const eventLog            = $('eventLog');
+const eventCountEl        = $('eventCount');
+const branchList          = $('branchList');
+const agentList           = $('agentList');
+const mobileBranchList    = $('mobileBranchList');
+const mobileAgentList     = $('mobileAgentList');
+const branchTree          = $('branchTree');
+const taskInput           = $('taskInput');
+const sendTaskBtn         = $('sendTaskBtn');
+const reconnectOverlay    = $('reconnectOverlay');
+const reconnectAttempt    = $('reconnectAttempt');
+const reconnectInfo       = $('reconnectInfo');
+const reconnectCountdown  = $('reconnectCountdown');
+const safetyModal         = $('safetyModal');
+const safetyToolName      = $('safetyToolName');
+const safetyReason        = $('safetyReason');
+const safetyArgs          = $('safetyArgs');
+const safetyApproveBtn    = $('safetyApproveBtn');
+const safetyDenyBtn       = $('safetyDenyBtn');
+const mobileSidebarToggle = $('mobileSidebarToggle');
+const mobileDrawer        = $('mobileDrawer');
+const mobileDrawerBackdrop = $('mobileDrawerBackdrop');
+const mobileDrawerClose   = $('mobileDrawerClose');
+const mobileStatusDot     = $('mobileStatusDot');
+const mobileStatusText    = $('mobileStatusText');
+
+// ========================================================================
+//  STATE
+// ========================================================================
+let eventCount = 0;
+let ws = null;
+let reconnectTimer = null;
+let reconnectCountdownValue = 3;
+let reconnectCountdownTimer = null;
+let reconnectAttemptCount = 0;
+let intentionalClose = false;
+let pendingSafety = null;
+
+// ========================================================================
+//  CONNECTION STATUS
+// ========================================================================
+function setConnected() {
+  statusBadge.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-emerald-900/30 text-emerald-400 border border-emerald-800/40';
+  statusDot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-400';
+  statusText.textContent = 'Connected';
+  if (mobileStatusDot) mobileStatusDot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-400';
+  if (mobileStatusText) mobileStatusText.textContent = 'Connected';
+  reconnectOverlay.classList.add('hidden');
+  reconnectInfo.classList.add('hidden');
+  clearCountdown();
+  sendTaskBtn.disabled = false;
+}
+
+function setDisconnected(reconnecting) {
+  const cls = reconnecting
+    ? 'bg-amber-900/30 text-amber-400 border-amber-800/40'
+    : 'bg-red-900/30 text-red-400 border-red-800/40';
+  const dotCls = reconnecting ? 'bg-amber-400' : 'bg-red-400';
+  const label = reconnecting ? 'Reconnecting...' : 'Disconnected';
+  statusBadge.className = `flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium ${cls}`;
+  statusDot.className = `w-1.5 h-1.5 rounded-full ${dotCls}`;
+  statusText.textContent = label;
+  if (mobileStatusDot) mobileStatusDot.className = `w-1.5 h-1.5 rounded-full ${dotCls}`;
+  if (mobileStatusText) mobileStatusText.textContent = label;
+  sendTaskBtn.disabled = true;
+}
+
+// ========================================================================
+//  WEBSOCKET
+// ========================================================================
+function connectWS() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${protocol}//${location.host}/ws`;
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    reconnectAttemptCount = 0;
+    setConnected();
+    addEvent('system', { content: 'WebSocket connected' });
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      handleServerEvent(data);
+    } catch (err) {
+      addEvent('system', { content: 'Parse error: ' + err.message });
+    }
+  };
+
+  ws.onclose = () => {
+    if (!intentionalClose) {
+      setDisconnected(true);
+      startReconnect();
+    }
+  };
+
+  ws.onerror = () => { /* onclose will fire after onerror */ };
+}
+
+function startReconnect() {
+  clearCountdown();
+  reconnectAttemptCount++;
+  reconnectAttempt.textContent = reconnectAttemptCount;
+  reconnectOverlay.classList.remove('hidden');
+  reconnectInfo.classList.remove('hidden');
+  reconnectCountdownValue = 3;
+  updateCountdownDisplay();
+  reconnectCountdownTimer = setInterval(() => {
+    reconnectCountdownValue--;
+    updateCountdownDisplay();
+    if (reconnectCountdownValue <= 0) {
+      clearCountdown();
+      connectWS();
+    }
+  }, 1000);
+}
+
+function updateCountdownDisplay() {
+  reconnectCountdown.textContent = reconnectCountdownValue;
+}
+
+function clearCountdown() {
+  if (reconnectCountdownTimer) {
+    clearInterval(reconnectCountdownTimer);
+    reconnectCountdownTimer = null;
+  }
+}
+
+function disconnectWS() {
+  intentionalClose = true;
+  if (ws) { ws.close(); ws = null; }
+  clearCountdown();
+  setDisconnected(false);
+  reconnectOverlay.classList.add('hidden');
+  reconnectInfo.classList.add('hidden');
+  addEvent('system', { content: 'WebSocket disconnected (intentional)' });
+}
+
+// ========================================================================
+//  EVENT DISPATCH
+// ========================================================================
+const ROLE_COLORS = {
+  system:    { bg: 'border-l-slate-600',  label: 'System',    labelCls: 'text-slate-400' },
+  user:      { bg: 'border-l-blue-500',   label: 'User',      labelCls: 'text-blue-400' },
+  assistant: { bg: 'border-l-emerald-500',label: 'Assistant', labelCls: 'text-emerald-400' },
+  tool:      { bg: 'border-l-indigo-500', label: 'Tool',      labelCls: 'text-indigo-400' },
+};
+
+function handleServerEvent(data) {
+  switch (data.type) {
+    case 'agent_message':
+      addAgentMessage(data);
+      break;
+    case 'tool_executing':
+      addToolExecuting(data);
+      break;
+    case 'tool_result':
+      addToolResult(data);
+      break;
+    case 'context_branched':
+      addContextBranched(data);
+      break;
+    case 'safety_review_required':
+      addSafetyReview(data);
+      break;
+    default:
+      addEvent('system', { content: JSON.stringify(data) });
+  }
+}
+
+function removePlaceholder() {
+  const ph = eventLog.querySelector('.text-slate-600');
+  if (ph && ph.textContent.includes('Waiting')) ph.remove();
+}
+
+function incrementCounter() {
+  eventCount++;
+  eventCountEl.textContent = `${eventCount} event${eventCount !== 1 ? 's' : ''}`;
+}
+
+// ========================================================================
+//  AGENT MESSAGE
+// ========================================================================
+function addAgentMessage(data) {
+  removePlaceholder();
+  const role = (data.role || 'assistant').toLowerCase();
+  const colors = ROLE_COLORS[role] || ROLE_COLORS.assistant;
+
+  const el = document.createElement('div');
+  el.className = `event-enter flex items-start gap-2.5 px-2.5 py-2 rounded-lg border border-slate-800/40 bg-slate-900/50 border-l-2 ${colors.bg}`;
+
+  const ts = document.createElement('span');
+  ts.className = 'shrink-0 text-[10px] text-slate-600 mt-0.5 select-none';
+  ts.textContent = time();
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'flex-1 min-w-0';
+
+  const label = document.createElement('span');
+  label.className = `text-[10px] uppercase tracking-wider font-semibold ${colors.labelCls}`;
+  label.textContent = colors.label;
+
+  const msg = document.createElement('div');
+  msg.className = 'text-sm text-slate-200 mt-0.5 leading-relaxed break-words';
+  msg.textContent = data.content || '(empty)';
+
+  wrapper.appendChild(label);
+  wrapper.appendChild(msg);
+  el.appendChild(ts);
+  el.appendChild(wrapper);
+  eventLog.appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  incrementCounter();
+  renderIcons(el);
+}
+
+// ========================================================================
+//  TOOL EXECUTING
+// ========================================================================
+function addToolExecuting(data) {
+  removePlaceholder();
+  const el = document.createElement('div');
+  el.className = 'event-enter flex items-start gap-2.5 px-2.5 py-2 rounded-lg border border-amber-800/30 bg-amber-900/10 border-l-2 border-l-amber-500 pulse-amber';
+
+  const ts = document.createElement('span');
+  ts.className = 'shrink-0 text-[10px] text-slate-600 mt-0.5 select-none';
+  ts.textContent = time();
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'flex-1 min-w-0';
+
+  const label = document.createElement('span');
+  label.className = 'text-[10px] uppercase tracking-wider font-semibold text-amber-400';
+  label.textContent = 'Executing Tool';
+
+  const nameRow = document.createElement('div');
+  nameRow.className = 'flex items-center gap-2 mt-0.5';
+
+  const icon = document.createElement('i');
+  icon.setAttribute('data-lucide', 'hammer');
+  icon.className = 'w-3.5 h-3.5 text-amber-400 shrink-0';
+
+  const name = document.createElement('span');
+  name.className = 'text-sm font-medium text-amber-300';
+  name.textContent = data.tool_name || 'unknown';
+
+  nameRow.appendChild(icon);
+  nameRow.appendChild(name);
+
+  wrapper.appendChild(label);
+  wrapper.appendChild(nameRow);
+
+  if (data.arguments) {
+    const argsDiv = document.createElement('div');
+    argsDiv.className = 'text-xs text-slate-500 mt-1 ml-5 truncate';
+    argsDiv.textContent = String(data.arguments).slice(0, 300);
+    wrapper.appendChild(argsDiv);
+  }
+
+  el.appendChild(ts);
+  el.appendChild(wrapper);
+  eventLog.appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  incrementCounter();
+  renderIcons(el);
+}
+
+// ========================================================================
+//  TOOL RESULT
+// ========================================================================
+function addToolResult(data) {
+  removePlaceholder();
+  const el = document.createElement('div');
+  el.className = 'event-enter flex items-start gap-2.5 px-2.5 py-2 rounded-lg border border-emerald-800/30 bg-emerald-900/10 border-l-2 border-l-emerald-500';
+
+  const ts = document.createElement('span');
+  ts.className = 'shrink-0 text-[10px] text-slate-600 mt-0.5 select-none';
+  ts.textContent = time();
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'flex-1 min-w-0';
+
+  const label = document.createElement('span');
+  label.className = 'text-[10px] uppercase tracking-wider font-semibold text-emerald-400';
+  label.textContent = 'Tool Result';
+
+  const msg = document.createElement('div');
+  msg.className = 'text-sm text-slate-300 mt-0.5 leading-relaxed break-words';
+  msg.textContent = data.result ? String(data.result).slice(0, 1000) : '(empty)';
+
+  wrapper.appendChild(label);
+  wrapper.appendChild(msg);
+  el.appendChild(ts);
+  el.appendChild(wrapper);
+  eventLog.appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  incrementCounter();
+  renderIcons(el);
+}
+
+// ========================================================================
+//  CONTEXT BRANCHED
+// ========================================================================
+function addContextBranched(data) {
+  removePlaceholder();
+  const el = document.createElement('div');
+  el.className = 'event-enter flex items-start gap-2.5 px-2.5 py-2 rounded-lg border border-purple-800/30 bg-purple-900/10 border-l-2 border-l-purple-500';
+
+  const ts = document.createElement('span');
+  ts.className = 'shrink-0 text-[10px] text-slate-600 mt-0.5 select-none';
+  ts.textContent = time();
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'flex-1 min-w-0';
+
+  const label = document.createElement('span');
+  label.className = 'text-[10px] uppercase tracking-wider font-semibold text-purple-400';
+  label.textContent = 'Branch Created';
+
+  const msg = document.createElement('div');
+  msg.className = 'text-sm text-slate-300 mt-0.5';
+  msg.textContent = `${data.branch_name || 'unknown'} (from ${data.source_branch || 'unknown'})`;
+
+  wrapper.appendChild(label);
+  wrapper.appendChild(msg);
+  el.appendChild(ts);
+  el.appendChild(wrapper);
+  eventLog.appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  incrementCounter();
+  renderIcons(el);
+
+  // Update sidebar
+  addBranchToSidebar(data.branch_name || 'unknown', data.source_branch || 'unknown');
+}
+
+function addBranchToSidebar(name, source) {
+  const item = document.createElement('div');
+  item.className = 'flex items-center gap-2 px-2 py-1.5 rounded bg-indigo-900/20 border border-indigo-800/30 text-xs text-indigo-300';
+  item.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0"></span><span class="truncate font-medium">${esc(name)}</span>`;
+  branchList.appendChild(item);
+
+  const mobileItem = item.cloneNode(true);
+  mobileBranchList.appendChild(mobileItem);
+
+  // Branch tree
+  const treeItem = document.createElement('div');
+  treeItem.className = 'flex items-center gap-2 py-1 text-indigo-300';
+  treeItem.innerHTML = `<i data-lucide="git-branch" class="w-3.5 h-3.5 text-indigo-400 shrink-0"></i><span class="font-medium">${esc(name)}</span><span class="text-[10px] text-slate-600 ml-auto">from ${esc(source)}</span>`;
+  branchTree.appendChild(treeItem);
+  renderIcons(treeItem);
+}
+
+// ========================================================================
+//  SAFETY REVIEW
+// ========================================================================
+function addSafetyReview(data) {
+  removePlaceholder();
+  const el = document.createElement('div');
+  el.className = 'event-enter flex items-start gap-2.5 px-2.5 py-2 rounded-lg border border-rose-800/30 bg-rose-900/10 border-l-2 border-l-rose-500';
+
+  const ts = document.createElement('span');
+  ts.className = 'shrink-0 text-[10px] text-slate-600 mt-0.5 select-none';
+  ts.textContent = time();
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'flex-1 min-w-0';
+
+  const label = document.createElement('span');
+  label.className = 'text-[10px] uppercase tracking-wider font-semibold text-rose-400';
+  label.textContent = 'Safety Review';
+
+  const reason = document.createElement('div');
+  reason.className = 'text-sm text-slate-300 mt-0.5';
+  reason.textContent = data.reason || 'Approval required';
+
+  wrapper.appendChild(label);
+  wrapper.appendChild(reason);
+  el.appendChild(ts);
+  el.appendChild(wrapper);
+  eventLog.appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  incrementCounter();
+  renderIcons(el);
+
+  showSafetyModal(data);
+}
+
+function showSafetyModal(data) {
+  safetyToolName.textContent = data.tool_name || 'unknown';
+  safetyReason.textContent = data.reason || 'Approval required';
+  safetyArgs.textContent = data.arguments
+    ? JSON.stringify(data.arguments, null, 2)
+    : '(none)';
+  pendingSafety = { tool_name: data.tool_name, reason: data.reason, arguments: data.arguments };
+  safetyModal.classList.remove('hidden');
+  renderIcons(safetyModal);
+}
+
+function closeSafetyModal() {
+  safetyModal.classList.add('hidden');
+  pendingSafety = null;
+}
+
+function sendSafetyResponse(approved) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'safety_response', approved }));
+  closeSafetyModal();
+  addEvent('system', { content: approved ? 'Tool approved via UI' : 'Tool denied via UI' });
+}
+
+// ========================================================================
+//  TASK DISPATCHER
+// ========================================================================
+function sendTask() {
+  const text = taskInput.value.trim();
+  if (!text) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addEvent('system', { content: 'Cannot send task: not connected' });
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'start_task', prompt: text }));
+  addEvent('agent_message', { role: 'user', content: text });
+  taskInput.value = '';
+}
+
+// ========================================================================
+//  LUCIDE ICON RENDERER
+// ========================================================================
+function renderIcons(root) {
+  if (typeof lucide !== 'undefined' && lucide.createIcons) {
+    lucide.createIcons({ attrs: { class: ['inline-block'] }, nameAttr: 'data-lucide', root: root || document.body });
+  }
+}
+
+// ========================================================================
+//  BOOTSTRAP
+// ========================================================================
+safetyApproveBtn.addEventListener('click', () => sendSafetyResponse(true));
+safetyDenyBtn.addEventListener('click', () => sendSafetyResponse(false));
+
+sendTaskBtn.addEventListener('click', sendTask);
+taskInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    sendTask();
+  }
+});
+
+mobileSidebarToggle.addEventListener('click', () => {
+  mobileDrawer.classList.remove('hidden');
+});
+mobileDrawerClose.addEventListener('click', () => {
+  mobileDrawer.classList.add('hidden');
+});
+mobileDrawerBackdrop.addEventListener('click', () => {
+  mobileDrawer.classList.add('hidden');
+});
+
+// Init Lucide icons
+renderIcons();
+
+// Connect on load
+connectWS();
+</script>
+</body>
+</html>

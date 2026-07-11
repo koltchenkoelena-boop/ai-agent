@@ -14,9 +14,10 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
+use axum::routing::get_service;
 
 use crate::types::{Message, ToolCall};
 
@@ -51,6 +52,28 @@ pub enum FrontendEvent {
     ContextBranched {
         branch_name: String,
         source_branch: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// ClientCommand — команды от фронтенда к агенту
+// ---------------------------------------------------------------------------
+
+/// Команды, полученные от фронтенда через WebSocket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientCommand {
+    /// Ответ пользователя на запрос safety-подтверждения.
+    SafetyResponse {
+        approved: bool,
+    },
+    /// Запустить новую задачу.
+    StartTask {
+        prompt: String,
+    },
+    /// Переключиться на ветку контекста.
+    SwitchBranch {
+        name: String,
     },
 }
 
@@ -96,41 +119,65 @@ impl super::super::hooks::PostToolHook for FrontendNotifierHook {
 // WebSocket handler
 // ---------------------------------------------------------------------------
 
-/// Состояние сервера — broadcast-отправитель для рассылки событий.
+/// Состояние сервера.
 #[derive(Clone)]
 struct AppState {
     tx: broadcast::Sender<FrontendEvent>,
+    cmd_tx: mpsc::Sender<ClientCommand>,
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.tx))
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-/// Обслуживает одно WebSocket-соединение: подписывается на broadcast
-/// и пересылает все события клиенту в виде JSON.
-async fn handle_socket(socket: WebSocket, tx: broadcast::Sender<FrontendEvent>) {
-    let (mut sender, _receiver) = socket.split();
-    let mut rx = Arc::new(tx).subscribe();
+/// Обслуживает одно WebSocket-соединение: двунаправленный обмен.
+///
+/// - broadcast → клиент: все `FrontendEvent` отправляются как JSON.
+/// - клиент → mpsc: `ClientCommand` десериализуются и передаются агенту.
+async fn handle_socket(socket: WebSocket, state: AppState) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = state.tx.subscribe();
+    let cmd_tx = state.cmd_tx;
 
     loop {
-        match rx.recv().await {
-            Ok(event) => {
-                let json = match serde_json::to_string(&event) {
-                    Ok(j) => j,
-                    Err(_) => continue,
-                };
-                if sender.send(WsMessage::Text(json.into())).await.is_err() {
-                    // Клиент отключился
-                    break;
+        tokio::select! {
+            // broadcast → клиент
+            event = rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        let json = match serde_json::to_string(&event) {
+                            Ok(j) => j,
+                            Err(_) => continue,
+                        };
+                        if sender.send(WsMessage::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Frontend WS lagged by {n} events");
+                        continue;
+                    }
                 }
             }
-            Err(broadcast::error::RecvError::Closed) => break,
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("Frontend WS lagged by {n} events");
-                continue;
+            // клиент → mpsc
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(WsMessage::Text(text))) => {
+                        if let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text) {
+                            let _ = cmd_tx.send(cmd).await;
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(_))) | None => break,
+                    Some(Err(e)) => {
+                        tracing::warn!("Frontend WS receive error: {e}");
+                        break;
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -140,20 +187,29 @@ async fn handle_socket(socket: WebSocket, tx: broadcast::Sender<FrontendEvent>) 
 // Запуск сервера
 // ---------------------------------------------------------------------------
 
-/// Запускает WebSocket-сервер на `127.0.0.1:8080`.
+/// Запускает WebSocket-сервер + статику на `0.0.0.0:8080`.
 ///
 /// Возвращает:
-/// - `broadcast::Sender<FrontendEvent>` — для публикации событий
-/// - `watch::Sender<bool>` — отправка `true` для graceful shutdown сервера
-pub fn start_frontend_server(
-) -> (broadcast::Sender<FrontendEvent>, watch::Sender<bool>) {
+/// - `broadcast::Sender<FrontendEvent>` — публикация событий
+/// - `watch::Sender<bool>` — graceful shutdown
+/// - `mpsc::Receiver<ClientCommand>` — команды от фронтенда
+pub fn start_frontend_server() -> (
+    broadcast::Sender<FrontendEvent>,
+    watch::Sender<bool>,
+    mpsc::Receiver<ClientCommand>,
+) {
     let (tx, _rx) = broadcast::channel(256);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
-    let state = AppState { tx: tx.clone() };
+    let state = AppState {
+        tx: tx.clone(),
+        cmd_tx,
+    };
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .fallback_service(get_service(ServeDir::new("static")))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -166,7 +222,7 @@ pub fn start_frontend_server(
             }
         };
 
-        tracing::info!("Frontend WebSocket server listening on ws://127.0.0.1:8080/ws");
+        tracing::info!("Frontend server listening on http://127.0.0.1:8080");
 
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -179,5 +235,5 @@ pub fn start_frontend_server(
         }
     });
 
-    (tx, shutdown_tx)
+    (tx, shutdown_tx, cmd_rx)
 }

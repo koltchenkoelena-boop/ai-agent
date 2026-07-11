@@ -112,10 +112,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          files in the project directory.",
     ));
 
-    // ---- Запуск фронтенд-сервера (WebSocket, 127.0.0.1:8080) --------------
-    let (frontend_tx, frontend_shutdown_tx) = start_frontend_server();
-    let notifier_hook = Arc::new(FrontendNotifierHook::new(frontend_tx));
+    // ---- Запуск фронтенд-сервера (WebSocket + статика, 0.0.0.0:8080) ------
+    let (frontend_tx, frontend_shutdown_tx, safety_cmd_rx) = start_frontend_server();
+    let notifier_hook = Arc::new(FrontendNotifierHook::new(frontend_tx.clone()));
     agent.add_post_hook(notifier_hook);
+    agent.set_frontend_tx(frontend_tx);
+    agent.set_safety_approval_rx(safety_cmd_rx);
 
     let model = std::env::var("AI_AGENT_MODEL").unwrap_or_else(|_| "qwen2.5:3b".into());
 
@@ -128,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║  Tools: {:<33} ║", agent.router.len());
     println!("║  Branch: {:<31} ║", agent.context.current_branch().name);
     println!("║  Messages: {:<29} ║", agent.context.current_messages().len());
-    println!("║  Frontend: ws://127.0.0.1:8080/ws          ║");
+    println!("║  UI: http://127.0.0.1:8080                ║");
     println!("╠══════════════════════════════════════════════╣");
     println!("║  /help — список команд                      ║");
     println!("╚══════════════════════════════════════════════╝");
