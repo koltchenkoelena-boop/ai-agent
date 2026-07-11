@@ -19,7 +19,7 @@ use std::time::Duration;
 use ai_agent::agent::Agent;
 use ai_agent::orchestrator::AgentCluster;
 use ai_agent::provider::{CredentialRotator, OllamaProvider};
-use ai_agent::tool_routing::frontend::{start_frontend_server, FrontendNotifierHook};
+use ai_agent::tool_routing::frontend::{start_frontend_server, ClientCommand, FrontendNotifierHook};
 use ai_agent::tool_routing::mcp_transport::load_mcp_config;
 use ai_agent::types::*;
 use tokio::io::AsyncBufReadExt;
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // ---- Запуск фронтенд-сервера (WebSocket + статика, 0.0.0.0:8080) ------
-    let (frontend_tx, frontend_shutdown_tx, safety_cmd_rx) = start_frontend_server();
+    let (frontend_tx, frontend_shutdown_tx, cmd_rx, safety_cmd_rx) = start_frontend_server();
     let notifier_hook = Arc::new(FrontendNotifierHook::new(frontend_tx.clone()));
     agent.add_post_hook(notifier_hook);
     agent.set_frontend_tx(frontend_tx);
@@ -150,10 +150,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚══════════════════════════════════════════════╝");
     println!();
 
-    // ---- Диалоговый цикл (async stdin + ctrl_c) ---------------------------
+    // ---- Диалоговый цикл (async stdin + ctrl_c + WebSocket-команды) -------
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let mut line_buf = String::new();
     let mut shutdown_requested = false;
+    let mut cmd_rx = cmd_rx; // ensure mut for recv
 
     loop {
         line_buf.clear();
@@ -162,8 +163,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         print!("> ");
         std::io::stdout().flush()?;
 
-        // ---- select: ждём либо ввод пользователя, либо Ctrl+C -------------
-        tokio::select! {
+        // ---- select: stdin / WebSocket-команды / Ctrl+C -----------------
+        let input = tokio::select! {
             result = stdin.read_line(&mut line_buf) => {
                 match result {
                     Ok(0) => {
@@ -177,15 +178,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break;
                     }
                 }
+                line_buf.trim().to_string()
+            }
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(ClientCommand::StartTask { prompt }) => {
+                        println!("\n[UI] New task: {prompt}");
+                        prompt
+                    }
+                    Some(ClientCommand::SwitchBranch { name }) => {
+                        match agent.context.switch_by_name(&name) {
+                            Ok(()) => {
+                                tracing::info!("Switched to branch '{name}'");
+                                println!("\n  Switched to branch '{name}'\n");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Branch switch failed: {e}");
+                                println!("\n  {e}\n");
+                            }
+                        }
+                        continue;
+                    }
+                    Some(ClientCommand::SafetyResponse { .. }) => {
+                        // SafetyResponse направляется отдельным каналом в агент
+                        continue;
+                    }
+                    None => {
+                        // Канал закрыт — сервер остановлен
+                        continue;
+                    }
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("\n[INFO] Ctrl+C received — shutting down gracefully...");
                 shutdown_requested = true;
                 break;
             }
-        }
+        };
 
-        let input = line_buf.trim().to_string();
         if input.is_empty() {
             continue;
         }

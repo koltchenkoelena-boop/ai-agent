@@ -124,6 +124,7 @@ impl super::super::hooks::PostToolHook for FrontendNotifierHook {
 struct AppState {
     tx: broadcast::Sender<FrontendEvent>,
     cmd_tx: mpsc::Sender<ClientCommand>,
+    safety_tx: mpsc::Sender<ClientCommand>,
 }
 
 async fn ws_handler(
@@ -136,11 +137,12 @@ async fn ws_handler(
 /// Обслуживает одно WebSocket-соединение: двунаправленный обмен.
 ///
 /// - broadcast → клиент: все `FrontendEvent` отправляются как JSON.
-/// - клиент → mpsc: `ClientCommand` десериализуются и передаются агенту.
+/// - клиент → mpsc: `SafetyResponse` → safety_tx, остальное → cmd_tx.
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
     let cmd_tx = state.cmd_tx;
+    let safety_tx = state.safety_tx;
 
     loop {
         tokio::select! {
@@ -163,12 +165,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 }
             }
-            // клиент → mpsc
+            // клиент → mpsc (раздельная маршрутизация)
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
                         if let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text) {
-                            let _ = cmd_tx.send(cmd).await;
+                            match &cmd {
+                                ClientCommand::SafetyResponse { .. } => {
+                                    let _ = safety_tx.send(cmd).await;
+                                }
+                                _ => {
+                                    let _ = cmd_tx.send(cmd).await;
+                                }
+                            }
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) | None => break,
@@ -192,19 +201,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// Возвращает:
 /// - `broadcast::Sender<FrontendEvent>` — публикация событий
 /// - `watch::Sender<bool>` — graceful shutdown
-/// - `mpsc::Receiver<ClientCommand>` — команды от фронтенда
+/// - `mpsc::Receiver<ClientCommand>` — команды задач (StartTask, SwitchBranch) от фронтенда
+/// - `mpsc::Receiver<ClientCommand>` — safety-ответы (SafetyResponse) от фронтенда
 pub fn start_frontend_server() -> (
     broadcast::Sender<FrontendEvent>,
     watch::Sender<bool>,
+    mpsc::Receiver<ClientCommand>,
     mpsc::Receiver<ClientCommand>,
 ) {
     let (tx, _rx) = broadcast::channel(256);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (safety_tx, safety_rx) = mpsc::channel(32);
 
     let state = AppState {
         tx: tx.clone(),
         cmd_tx,
+        safety_tx,
     };
 
     let app = Router::new()
@@ -235,5 +248,5 @@ pub fn start_frontend_server() -> (
         }
     });
 
-    (tx, shutdown_tx, cmd_rx)
+    (tx, shutdown_tx, cmd_rx, safety_rx)
 }
