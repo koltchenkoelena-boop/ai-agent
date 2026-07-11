@@ -55,6 +55,10 @@ pub enum FrontendEvent {
         branch_name: String,
         source_branch: String,
     },
+    /// Информация о модели при запуске.
+    ModelInfo {
+        model_name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

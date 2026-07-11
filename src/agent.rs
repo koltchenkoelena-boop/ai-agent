@@ -426,6 +426,7 @@ impl<P: ModelProvider> Agent<P> {
 
         let assistant_msg = acc.into_message();
         let has_tool_calls = assistant_msg.tool_calls.is_some();
+        let assistant_text = assistant_msg.content.clone(); // сохраняем для фронтенда
 
         // --- Шаг 3: сохраняем ответ модели ---
         self.context.push(assistant_msg);
@@ -435,6 +436,17 @@ impl<P: ModelProvider> Agent<P> {
             // Берём последнее сообщение из контекста
             let msgs = self.context.current_messages();
             return Ok(msgs.last().and_then(|m| m.content.clone()));
+        }
+
+        // --- Промежуточный текст ассистента — отправляем на фронтенд ---
+        if let Some(ref tx) = self.frontend_tx {
+            if let Some(ref content) = assistant_text {
+                if !content.trim().is_empty() {
+                    let _ = tx.send(FrontendEvent::AgentMessage {
+                        content: content.clone(),
+                    });
+                }
+            }
         }
 
         // --- Шаг 5: обработка тулов ---

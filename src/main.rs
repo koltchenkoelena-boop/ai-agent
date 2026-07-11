@@ -115,6 +115,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let model = std::env::var("AI_AGENT_MODEL").unwrap_or_else(|_| "qwen2.5:3b".into());
 
+    // Отправляем имя модели на фронтенд
+    let _ = frontend_tx.send(FrontendEvent::ModelInfo {
+        model_name: model.clone(),
+    });
+
     // ---- Приветствие -------------------------------------------------------
     println!();
     println!("╔══════════════════════════════════════════════╗");
