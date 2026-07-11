@@ -1,0 +1,6 @@
+target/
+.git/
+.gitignore
+prompt-*.md
+notes/
+*.md~

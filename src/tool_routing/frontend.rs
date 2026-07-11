@@ -158,7 +158,7 @@ pub fn start_frontend_server(
         .with_state(state);
 
     tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::bind("127.0.0.1:8080").await {
+        let listener = match tokio::net::TcpListener::bind("0.0.0.0:8080").await {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!("Failed to bind frontend server: {e}");

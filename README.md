@@ -124,6 +124,30 @@ tokio, async-trait, futures-util, tokio-util, reqwest, async-stream, serde, serd
 ]
 ```
 
+## Docker
+
+Многоступенчатая сборка: `rust:1.80-slim` (builder) → `debian:bookworm-slim` (runtime).
+
+```bash
+# Сборка образа
+docker build -t ai-agent .
+
+# Запуск (интерактивный)
+docker run -it --rm \
+  -e AI_AGENT_MODEL=qwen2.5:3b \
+  -p 8080:8080 \
+  ai-agent
+
+# Запуск с MCP-контейнерами (требуется docker.sock)
+docker run -it --rm \
+  -e AI_AGENT_MODEL=qwen2.5:3b \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -p 8080:8080 \
+  ai-agent
+```
+
+При связи с внешним Ollama — передай `http://host.docker.internal:11434` или IP хоста.
+
 ## Тесты
 
 ```
