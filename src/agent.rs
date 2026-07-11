@@ -312,11 +312,26 @@ impl<P: ModelProvider> Agent<P> {
                 .await;
 
             match decision {
-                SafetyDecision::Allow => {}
+                SafetyDecision::Allow => {
+                    tracing::info!(
+                        tool = %call.function.name,
+                        "[SAFETY] Tool execution APPROVED"
+                    );
+                }
                 SafetyDecision::Deny(reason) => {
+                    tracing::error!(
+                        tool = %call.function.name,
+                        reason = %reason,
+                        "[SAFETY] Tool execution DENIED"
+                    );
                     return Err(AgentError::SafetyViolation(reason));
                 }
                 SafetyDecision::RequiresApproval(reason) => {
+                    tracing::warn!(
+                        tool = %call.function.name,
+                        reason = %reason,
+                        "[SAFETY] Requires approval"
+                    );
                     println!("\n⚠️  Requires approval: {reason}");
                     print!("Proceed? (Y/n): ");
                     use std::io::Write;
