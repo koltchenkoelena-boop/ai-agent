@@ -31,3 +31,4 @@ strip = true
 
 [dev-dependencies]
 tokio-test = "0.4"
+httpmock = "0.7"

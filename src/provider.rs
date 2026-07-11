@@ -149,6 +149,444 @@ impl OllamaProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ProviderConfig — конфигурация одного провайдера LLM
+// ---------------------------------------------------------------------------
+
+/// Конфигурация одного провайдера в пуле FallbackProvider.
+#[derive(Clone, Debug)]
+pub struct ProviderConfig {
+    /// Человеческое имя (для логов)
+    pub name: String,
+    /// Базовый URL API (например, http://localhost:11434 или https://openrouter.ai/api/v1)
+    pub base_url: String,
+    /// Имя модели (будет подставлено в поле "model" JSON-запроса)
+    pub model_name: String,
+    /// Bearer API-ключ (если требуется)
+    pub api_key: Option<String>,
+    /// Поддерживает ли этот провайдер эмбеддинги (/api/embeddings)
+    pub supports_embeddings: bool,
+}
+
+/// Собрать пул провайдеров из переменных окружения.
+///
+/// Порядок приоритета:
+/// 1. `AGENT_PROVIDER_POOL` — явный список эндпоинтов (каждый становится провайдером)
+/// 2. `OPENROUTER_API_KEY` — OpenRouter (если ключ задан)
+/// 3. Локальная Ollama (всегда, как финальный fallback)
+pub fn build_provider_pool() -> Vec<ProviderConfig> {
+    let mut providers: Vec<ProviderConfig> = Vec::new();
+
+    let default_model = std::env::var("AI_AGENT_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".into());
+    let ollama_api_key = std::env::var("OLLAMA_API_KEY").ok();
+
+    // 1. AGENT_PROVIDER_POOL — явный пул эндпоинтов
+    if let Ok(val) = std::env::var("AGENT_PROVIDER_POOL") {
+        let val = val.trim().to_string();
+        if !val.is_empty() {
+            let endpoints: Vec<&str> = val
+                .split(',')
+                .map(|s| s.trim().trim_matches(&['[', ']', '"', '\''][..]))
+                .filter(|s| !s.is_empty())
+                .collect();
+            for (i, ep) in endpoints.iter().enumerate() {
+                providers.push(ProviderConfig {
+                    name: format!("pool-{i}"),
+                    base_url: ep.to_string(),
+                    model_name: default_model.clone(),
+                    api_key: ollama_api_key.clone(),
+                    supports_embeddings: true,
+                });
+            }
+        }
+    }
+
+    // 2. OpenRouter (если задан OPENROUTER_API_KEY)
+    if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            let or_model = std::env::var("OPENROUTER_MODEL")
+                .unwrap_or_else(|_| "qwen/qwen-2.5-coder-32b-instruct:free".into());
+            providers.push(ProviderConfig {
+                name: "openrouter".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                model_name: or_model,
+                api_key: Some(key),
+                supports_embeddings: false,
+            });
+        }
+    }
+
+    // 3. Локальная Ollama (всегда — финальный fallback)
+    {
+        let local_url = std::env::var("OLLAMA_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:11434".into());
+        providers.push(ProviderConfig {
+            name: "ollama-local".into(),
+            base_url: local_url,
+            model_name: default_model,
+            api_key: ollama_api_key,
+            supports_embeddings: true,
+        });
+    }
+
+    providers
+}
+
+// ---------------------------------------------------------------------------
+// SSE stream helper
+// ---------------------------------------------------------------------------
+
+/// Преобразовать HTTP-ответ (SSE-поток data: ...) в `ProviderStream`.
+///
+/// Используется внутри `FallbackProvider` (и может быть переиспользован
+/// `OllamaProvider`).
+fn response_to_sse_stream(
+    response: reqwest::Response,
+    chunk_timeout: Duration,
+) -> ProviderStream {
+    let reader = StreamReader::new(
+        response
+            .bytes_stream()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+    );
+    let mut lines = BufReader::new(reader).lines();
+    let timeout = chunk_timeout;
+
+    let stream = async_stream::try_stream! {
+        loop {
+            let maybe_line = tokio::time::timeout(timeout, lines.next_line())
+                .await
+                .map_err(|_| ProviderError::ChunkTimeout(timeout))?;
+
+            match maybe_line {
+                Ok(None) => break,   // EOF
+                Err(e) => Err(ProviderError::Execution(e.to_string()))?,
+                Ok(Some(line)) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == "data: [DONE]" {
+                        break;
+                    }
+                    if let Some(data) = trimmed.strip_prefix("data: ") {
+                        let parsed: OpenAIStreamChunk =
+                            serde_json::from_str(data)?;
+                        if let Some(choice) = parsed.choices.first() {
+                            yield ChatChunk {
+                                delta_content: choice.delta.content.clone(),
+                                delta_tool_calls: choice.delta.tool_calls.clone(),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    Box::pin(stream)
+}
+
+// ---------------------------------------------------------------------------
+// FallbackProvider — отказоустойчивый прокси-провайдер
+// ---------------------------------------------------------------------------
+
+/// Multi-provider провайдер с автоматическим failover.
+///
+/// Реализует `ModelProvider`, владея пулом `ProviderConfig`.
+/// При ошибке сети, таймауте или HTTP-статусе != 2xx переключается
+/// на следующего провайдера в пуле (round-robin).
+///
+/// Контекст переключается прозрачно — `stream_chat` передаёт один
+/// и тот же массив сообщений всем провайдерам; Agent не видит разницы.
+#[derive(Clone)]
+pub struct FallbackProvider {
+    client: reqwest::Client,
+    providers: Vec<ProviderConfig>,
+    current_index: Arc<AtomicUsize>,
+    chunk_timeout: Duration,
+    /// Модель для эмбеддингов (Ollama-specific /api/embeddings).
+    embedding_model: String,
+}
+
+impl FallbackProvider {
+    pub fn new(providers: Vec<ProviderConfig>, chunk_timeout: Duration) -> Self {
+        let embedding_model = std::env::var("AI_AGENT_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "nomic-embed-text".into());
+        Self {
+            client: reqwest::Client::new(),
+            providers,
+            current_index: Arc::new(AtomicUsize::new(0)),
+            chunk_timeout,
+            embedding_model,
+        }
+    }
+
+    /// Shortcut: создать FallbackProvider из переменных окружения.
+    pub fn from_env() -> Self {
+        Self::new(build_provider_pool(), Duration::from_secs(10))
+    }
+
+    /// Количество провайдеров в пуле.
+    pub fn provider_count(&self) -> usize {
+        self.providers.len()
+    }
+}
+
+#[async_trait]
+impl ModelProvider for FallbackProvider {
+    async fn stream_chat(
+        &self,
+        _model: &str,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+    ) -> Result<ProviderStream, ProviderError> {
+        let n = self.providers.len();
+        let mut last_error = ProviderError::Execution("All providers failed".into());
+
+        for _ in 0..n {
+            let idx = self.current_index.fetch_add(1, Ordering::Relaxed) % n;
+            let cfg = &self.providers[idx];
+
+            let base_url = cfg.base_url.trim_end_matches('/');
+            let url = format!("{base_url}/v1/chat/completions");
+
+            // ---- Build JSON payload ------------------------------------------
+            let openai_tools = tools.as_ref().map(|t| {
+                t.iter()
+                    .map(|td| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": td.name,
+                                "description": td.description,
+                                "parameters": td.parameters,
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let mut payload = serde_json::json!({
+                "model": cfg.model_name,
+                "messages": messages,
+                "stream": true,
+            });
+            if let Some(ref ot) = openai_tools {
+                payload["tools"] = serde_json::json!(ot);
+            }
+
+            // ---- POST --------------------------------------------------------
+            let mut http_req = self.client.post(&url).json(&payload);
+            if let Some(ref key) = cfg.api_key {
+                http_req = http_req.header("Authorization", format!("Bearer {key}"));
+            }
+
+            let response = match http_req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        "FallbackProvider: provider '{}' network error: {e} — trying next",
+                        cfg.name,
+                    );
+                    last_error = ProviderError::Network(e);
+                    continue;
+                }
+            };
+
+            // ---- Проверка статуса --------------------------------------------
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let body = response.text().await.unwrap_or_default();
+
+                // 413 пробрасываем сразу (обрабатывается в Agent::run_step)
+                if status == 413 {
+                    return Err(ProviderError::ApiError { status, body });
+                }
+
+                tracing::warn!(
+                    "FallbackProvider: provider '{}' returned HTTP {status}: {body} — trying next",
+                    cfg.name,
+                );
+                last_error = ProviderError::ApiError { status, body };
+                continue;
+            }
+
+            tracing::info!(
+                "FallbackProvider: streaming from '{}' (model: {})",
+                cfg.name,
+                cfg.model_name,
+            );
+
+            return Ok(response_to_sse_stream(response, self.chunk_timeout));
+        }
+
+        Err(last_error)
+    }
+
+    async fn get_embedding(&self, text: &str) -> Result<Vec<f32>, ProviderError> {
+        let n = self.providers.len();
+        let mut last_error =
+            ProviderError::Execution("All providers failed for embedding".into());
+
+        for _ in 0..n {
+            let idx = self.current_index.fetch_add(1, Ordering::Relaxed) % n;
+            let cfg = &self.providers[idx];
+
+            // Пропускаем провайдеров без поддержки эмбеддингов
+            if !cfg.supports_embeddings {
+                continue;
+            }
+
+            let base_url = cfg.base_url.trim_end_matches('/');
+            let url = format!("{base_url}/api/embeddings");
+
+            let payload = OllamaEmbeddingRequest {
+                model: self.embedding_model.clone(),
+                prompt: text.to_string(),
+            };
+
+            let mut http_req = self.client.post(&url).json(&payload);
+            if let Some(ref key) = cfg.api_key {
+                http_req = http_req.header("Authorization", format!("Bearer {key}"));
+            }
+
+            let response = match http_req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        "FallbackProvider: embedding from '{}' network error: {e} — trying next",
+                        cfg.name,
+                    );
+                    last_error = ProviderError::Network(e);
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let body = response.text().await.unwrap_or_default();
+                tracing::warn!(
+                    "FallbackProvider: embedding from '{}' returned HTTP {status}: {body} — trying next",
+                    cfg.name,
+                );
+                last_error = ProviderError::ApiError { status, body };
+                continue;
+            }
+
+            let parsed: OllamaEmbeddingResponse = match response.json().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        "FallbackProvider: embedding parse from '{}' failed: {e} — trying next",
+                        cfg.name,
+                    );
+                    last_error = ProviderError::Network(e);
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                "FallbackProvider: embedding from '{}' (dim: {})",
+                cfg.name,
+                parsed.embedding.len(),
+            );
+            return Ok(parsed.embedding);
+        }
+
+        Err(last_error)
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use httpmock::prelude::*;
+
+    // -------------------------------------------------------------------
+    // Mock-сервер для тестирования failover
+    // -------------------------------------------------------------------
+
+    /// Проверяем, что если первый провайдер возвращает 429, FallbackProvider
+    /// бесшовно переключается на второго провайдера и возвращает успешный стрим.
+    #[tokio::test]
+    async fn test_fallback_on_http_error() {
+        let server1 = MockServer::start();
+        let server2 = MockServer::start();
+
+        let providers = vec![
+            ProviderConfig {
+                name: "rate-limited".into(),
+                base_url: server1.base_url(),
+                model_name: "model-a".into(),
+                api_key: None,
+                supports_embeddings: false,
+            },
+            ProviderConfig {
+                name: "working".into(),
+                base_url: server2.base_url(),
+                model_name: "model-b".into(),
+                api_key: None,
+                supports_embeddings: false,
+            },
+        ];
+
+        let fb = FallbackProvider::new(providers, Duration::from_secs(5));
+
+        // Первый провайдер — 429
+        let _m1 = server1.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions");
+            then.status(429)
+                .header("Content-Type", "application/json")
+                .body(r#"{"error":"rate limited"}"#);
+        });
+
+        // Второй провайдер — успешный SSE-стрим
+        let sse_body = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\",\"tool_calls\":null}}]}\n\ndata: [DONE]\n\n";
+        let _m2 = server2.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200)
+                .header("Content-Type", "text/event-stream")
+                .body(sse_body);
+        });
+
+        let mut stream = fb
+            .stream_chat("test", vec![Message::new(Role::User, "hi")], None)
+            .await
+            .unwrap();
+
+        // Проверяем, что получили чанк со второго провайдера
+        let chunk = stream.next().await.transpose().unwrap();
+        assert!(chunk.is_some(), "Expected a chunk from the fallback provider");
+        assert_eq!(
+            chunk.unwrap().delta_content.as_deref(),
+            Some("Hello"),
+            "Content should come from the working provider"
+        );
+
+        // Проверяем, что оставшийся стрим пуст (DONE)
+        let done = stream.next().await;
+        assert!(done.is_none(), "Stream should be exhausted after [DONE]");
+    }
+
+    /// Проверяем, что тест build_provider_pool возвращает хотя бы local Ollama
+    #[test]
+    fn test_build_provider_pool_has_fallback() {
+        let pool = build_provider_pool();
+        assert!(!pool.is_empty(), "Pool must not be empty");
+        assert!(
+            pool.iter().any(|p| p.name == "ollama-local"),
+            "Pool must include local Ollama fallback"
+        );
+    }
+}
+
 // --- Wire types matching OpenAI chat completions API (streaming) -----------
 
 #[derive(Serialize)]

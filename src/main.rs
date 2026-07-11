@@ -14,18 +14,17 @@
 
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ai_agent::agent::Agent;
 use ai_agent::orchestrator::AgentCluster;
-use ai_agent::provider::{CredentialRotator, OllamaProvider};
+use ai_agent::provider::FallbackProvider;
 use ai_agent::tool_routing::frontend::{start_frontend_server, ClientCommand, FrontendEvent, FrontendNotifierHook};
 use ai_agent::tool_routing::mcp_transport::load_mcp_config;
 use ai_agent::types::*;
 use tokio::io::AsyncBufReadExt;
 
 /// Сохранить снапшот всех веток в `history_dump.json`.
-fn persist_snapshot(agent: &Agent<OllamaProvider>) {
+fn persist_snapshot(agent: &Agent<FallbackProvider>) {
     let snap = agent.context.snapshot();
     match serde_json::to_string_pretty(&snap) {
         Ok(json) => {
@@ -59,59 +58,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("No MCP config found — skipping MCP tool discovery");
     }
 
-    // ---- Инициализация агента ----------------------------------------------
-    let ollama = match std::env::var("AGENT_PROVIDER_POOL") {
-        Ok(val) if !val.is_empty() => {
-            let endpoints: Vec<String> = val
-                .split(',')
-                .map(|s| {
-                    s.trim()
-                        .trim_matches(&['[', ']', '"', '\''][..])
-                        .to_string()
-                })
-                .filter(|s| !s.is_empty())
-                .collect();
-            if endpoints.is_empty() {
-                tracing::warn!(
-                    "AGENT_PROVIDER_POOL is set but empty after parsing — using local Ollama"
-                );
-                OllamaProvider::local()
-            } else if endpoints.len() == 1 {
-                tracing::info!("Using single provider endpoint: {}", endpoints[0]);
-                OllamaProvider::new(&endpoints[0], Duration::from_secs(10))
-            } else {
-                let rotator = CredentialRotator::new(endpoints.clone());
-                tracing::info!(
-                    "Using provider pool with {} endpoints (round-robin)",
-                    endpoints.len()
-                );
-                OllamaProvider::new(
-                    endpoints[0].clone(),
-                    Duration::from_secs(10),
-                )
-                .with_rotator(rotator)
-            }
-        }
-        _ => {
-            tracing::info!("No AGENT_PROVIDER_POOL set — using local Ollama");
-            OllamaProvider::local()
-        }
-    };
-
-    // ---- API-ключ для Ollama Cloud / OpenAI-совместимых эндпоинтов --------
-    let ollama = if let Ok(key) = std::env::var("OLLAMA_API_KEY") {
-        let trimmed = key.trim().to_string();
-        if !trimmed.is_empty() {
-            tracing::info!("Using OLLAMA_API_KEY for Bearer auth");
-            ollama.with_api_key(trimmed)
-        } else {
-            ollama
-        }
-    } else {
-        ollama
-    };
-
-    let mut agent = Agent::new(ollama);
+    // ---- Инициализация FallbackProvider из переменных окружения ------------
+    let provider = FallbackProvider::from_env();
+    tracing::info!(
+        "Initialized FallbackProvider with {} providers",
+        provider.provider_count(),
+    );
+    let mut agent = Agent::new(provider);
 
     // Регистрируем MCP-тулы (если есть конфиг)
     if let Some(ref containers) = mcp_containers {
