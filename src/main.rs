@@ -14,9 +14,11 @@
 
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ai_agent::agent::Agent;
-use ai_agent::provider::OllamaProvider;
+use ai_agent::orchestrator::AgentCluster;
+use ai_agent::provider::{CredentialRotator, OllamaProvider};
 use ai_agent::tool_routing::frontend::{start_frontend_server, FrontendNotifierHook};
 use ai_agent::tool_routing::mcp_transport::load_mcp_config;
 use ai_agent::types::*;
@@ -58,7 +60,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---- Инициализация агента ----------------------------------------------
-    let ollama = OllamaProvider::local();
+    let ollama = match std::env::var("AGENT_PROVIDER_POOL") {
+        Ok(val) if !val.is_empty() => {
+            let endpoints: Vec<String> = val
+                .split(',')
+                .map(|s| {
+                    s.trim()
+                        .trim_matches(&['[', ']', '"', '\''][..])
+                        .to_string()
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+            if endpoints.is_empty() {
+                tracing::warn!(
+                    "AGENT_PROVIDER_POOL is set but empty after parsing — using local Ollama"
+                );
+                OllamaProvider::local()
+            } else if endpoints.len() == 1 {
+                tracing::info!("Using single provider endpoint: {}", endpoints[0]);
+                OllamaProvider::new(&endpoints[0], Duration::from_secs(10))
+            } else {
+                let rotator = CredentialRotator::new(endpoints.clone());
+                tracing::info!(
+                    "Using provider pool with {} endpoints (round-robin)",
+                    endpoints.len()
+                );
+                OllamaProvider::new(
+                    endpoints[0].clone(),
+                    Duration::from_secs(10),
+                )
+                .with_rotator(rotator)
+            }
+        }
+        _ => {
+            tracing::info!("No AGENT_PROVIDER_POOL set — using local Ollama");
+            OllamaProvider::local()
+        }
+    };
     let mut agent = Agent::new(ollama);
 
     // Регистрируем MCP-тулы (если есть конфиг)
@@ -153,6 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("    /rename <name>     Rename current branch");
                     println!("    /tools             List registered tools");
                     println!("    /snapshot          Show snapshot of all branches");
+                    println!("    /swarm             Run parallel sub-agents (demo)");
                     println!();
                     println!("  Everything else is sent to the LLM as a user message.");
                     println!();
@@ -192,6 +231,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("  {}{} [{}] ({} msgs)", marker, name, &id[..8], msgs.len());
                     }
                     println!();
+                }
+                "/swarm" => {
+                    let provider = agent.provider.clone();
+                    let mut cluster = AgentCluster::new(provider);
+                    // Copy current context messages
+                    for msg in agent.context.current_messages().iter() {
+                        cluster.context.push(msg.clone());
+                    }
+
+                    println!();
+                    println!("  Spawning 2 parallel sub-agents...");
+
+                    let tasks = vec![
+                        (
+                            "researcher".to_string(),
+                            "Use the glob tool to list all .rs files in the src directory. \
+                             Report the filenames you find."
+                                .to_string(),
+                        ),
+                        (
+                            "summarizer".to_string(),
+                            "Read the Cargo.toml file and summarize its dependencies. \
+                             List the key dependencies and their purposes."
+                                .to_string(),
+                        ),
+                    ];
+
+                    match cluster.execute_parallel_tasks(tasks, &model).await {
+                        Ok(report) => {
+                            println!();
+                            println!("{}", report);
+                            println!();
+                        }
+                        Err(e) => {
+                            eprintln!("  Swarm execution error: {e}");
+                        }
+                    }
                 }
                 _ => {
                     // Парсим команды с аргументами: /switch <name>, /rename <name>

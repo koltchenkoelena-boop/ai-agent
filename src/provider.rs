@@ -1,4 +1,6 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -52,6 +54,49 @@ pub trait ModelProvider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// CredentialRotator — потокобезопасная round-robin ротация эндпоинтов/ключей
+// ---------------------------------------------------------------------------
+
+/// Thread-safe round-robin rotator for a pool of endpoints or API keys.
+///
+/// Each call to `get_next()` returns the next URL/credential in the list,
+/// wrapping around modulo the pool length.
+#[derive(Clone)]
+pub struct CredentialRotator {
+    endpoints: Vec<String>,
+    counter: Arc<AtomicUsize>,
+}
+
+impl CredentialRotator {
+    /// Create a new rotator from a non-empty list of endpoints.
+    ///
+    /// # Panics
+    /// Panics if `endpoints` is empty.
+    pub fn new(endpoints: Vec<String>) -> Self {
+        assert!(
+            !endpoints.is_empty(),
+            "CredentialRotator requires at least one endpoint"
+        );
+        Self {
+            endpoints,
+            counter: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Return the next endpoint URL in round-robin order.
+    ///
+    /// Returns `None` only when the pool is empty (should not happen
+    /// after construction via `new`).
+    pub fn get_next(&self) -> Option<String> {
+        if self.endpoints.is_empty() {
+            return None;
+        }
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.endpoints.len();
+        Some(self.endpoints[idx].clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Ollama provider — OpenAI-compatible streaming via SSE (data: lines)
 // ---------------------------------------------------------------------------
 
@@ -60,6 +105,7 @@ pub struct OllamaProvider {
     client: reqwest::Client,
     base_url: String,
     chunk_timeout: Duration,
+    rotator: Option<CredentialRotator>,
 }
 
 impl OllamaProvider {
@@ -68,12 +114,19 @@ impl OllamaProvider {
             client: reqwest::Client::new(),
             base_url: base_url.into(),
             chunk_timeout,
+            rotator: None,
         }
     }
 
     /// Shortcut pointing at default local Ollama (http://localhost:11434).
     pub fn local() -> Self {
         Self::new("http://localhost:11434", Duration::from_secs(10))
+    }
+
+    /// Attach a credential rotator for round-robin endpoint switching.
+    pub fn with_rotator(mut self, rotator: CredentialRotator) -> Self {
+        self.rotator = Some(rotator);
+        self
     }
 }
 
@@ -120,7 +173,12 @@ impl ModelProvider for OllamaProvider {
         messages: Vec<Message>,
         tools: Option<Vec<ToolDefinition>>,
     ) -> Result<ProviderStream, ProviderError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        // Pick base URL from the rotator (round-robin) or fall back to the fixed one.
+        let base_url = match &self.rotator {
+            Some(r) => r.get_next().unwrap_or_else(|| self.base_url.clone()),
+            None => self.base_url.clone(),
+        };
+        let url = format!("{}/v1/chat/completions", base_url);
 
         let payload = OpenAIRequest {
             model: model.to_string(),

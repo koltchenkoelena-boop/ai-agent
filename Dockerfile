@@ -2,7 +2,7 @@
 # Single-stage: копируем бинарник, собранный локально (не требует rust-образа)
 # =============================================================================
 # Сборка: cargo build --release
-# Сборка образа: docker build -t ai-agent .
+# Сборка образа: docker build -t native-ai-agent .
 # =============================================================================
 FROM debian:bookworm-slim
 
@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y ca-certificates curl && \
     curl -fsSL https://get.docker.com | sh
 
 WORKDIR /app
-COPY ai-agent.bin /app/ai-agent
+COPY target/release/ai-agent /app/ai-agent
 
 EXPOSE 8080
 
