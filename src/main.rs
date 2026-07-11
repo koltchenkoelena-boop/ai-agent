@@ -1,22 +1,43 @@
 // ---------------------------------------------------------------------------
-// AI Agent — Interactive CLI
+// AI Agent — Interactive CLI + Frontend WebSocket server
 // ---------------------------------------------------------------------------
 // Команды:
-//   /exit       — выход
+//   /exit       — выход (с сохранением snapshot)
 //   /help       — справка
 //   /branch     — список веток контекста
 //   /switch <n> — переключиться на ветку по имени
 //   /rename <n> — переименовать текущую ветку
 //   /tools      — список зарегистрированных тулов
 //   /snapshot   — показать снапшот всех веток
+//   Ctrl+C      — graceful shutdown (snapshot + завершение)
 // ---------------------------------------------------------------------------
 
 use std::io::Write;
+use std::sync::Arc;
 
 use ai_agent::agent::Agent;
 use ai_agent::provider::OllamaProvider;
+use ai_agent::tool_routing::frontend::{start_frontend_server, FrontendNotifierHook};
 use ai_agent::tool_routing::mcp_transport::load_mcp_config;
 use ai_agent::types::*;
+use tokio::io::AsyncBufReadExt;
+
+/// Сохранить снапшот всех веток в `history_dump.json`.
+fn persist_snapshot(agent: &Agent<OllamaProvider>) {
+    let snap = agent.context.snapshot();
+    match serde_json::to_string_pretty(&snap) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write("history_dump.json", &json) {
+                eprintln!("[WARN] Failed to write history_dump.json: {e}");
+            } else {
+                tracing::info!("Context snapshot saved to history_dump.json");
+            }
+        }
+        Err(e) => {
+            eprintln!("[WARN] Failed to serialize context snapshot: {e}");
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,32 +74,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          files in the project directory.",
     ));
 
+    // ---- Запуск фронтенд-сервера (WebSocket, 127.0.0.1:8080) --------------
+    let (frontend_tx, frontend_shutdown_tx) = start_frontend_server();
+    let notifier_hook = Arc::new(FrontendNotifierHook::new(frontend_tx));
+    agent.add_post_hook(notifier_hook);
+
     let model = std::env::var("AI_AGENT_MODEL").unwrap_or_else(|_| "qwen2.5:3b".into());
 
     // ---- Приветствие -------------------------------------------------------
     println!();
-    println!("╔══════════════════════════════════════════╗");
-    println!("║         AI Agent — Interactive CLI       ║");
-    println!("╠══════════════════════════════════════════╣");
+    println!("╔══════════════════════════════════════════════╗");
+    println!("║         AI Agent — Interactive CLI           ║");
+    println!("╠══════════════════════════════════════════════╣");
     println!("║  Model: {:<33} ║", model);
     println!("║  Tools: {:<33} ║", agent.router.len());
     println!("║  Branch: {:<31} ║", agent.context.current_branch().name);
     println!("║  Messages: {:<29} ║", agent.context.current_messages().len());
-    println!("╠══════════════════════════════════════════╣");
-    println!("║  /help — список команд                  ║");
-    println!("╚══════════════════════════════════════════╝");
+    println!("║  Frontend: ws://127.0.0.1:8080/ws          ║");
+    println!("╠══════════════════════════════════════════════╣");
+    println!("║  /help — список команд                      ║");
+    println!("╚══════════════════════════════════════════════╝");
     println!();
 
-    // ---- Диалоговый цикл ---------------------------------------------------
+    // ---- Диалоговый цикл (async stdin + ctrl_c) ---------------------------
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut line_buf = String::new();
+    let mut shutdown_requested = false;
+
     loop {
+        line_buf.clear();
+
         // Промпт
         print!("> ");
         std::io::stdout().flush()?;
 
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let input = input.trim().to_string();
+        // ---- select: ждём либо ввод пользователя, либо Ctrl+C -------------
+        tokio::select! {
+            result = stdin.read_line(&mut line_buf) => {
+                match result {
+                    Ok(0) => {
+                        // EOF (Ctrl+D)
+                        println!();
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("[ERROR] stdin error: {e}");
+                        break;
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n[INFO] Ctrl+C received — shutting down gracefully...");
+                shutdown_requested = true;
+                break;
+            }
+        }
 
+        let input = line_buf.trim().to_string();
         if input.is_empty() {
             continue;
         }
@@ -87,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if input.starts_with('/') {
             match input.as_str() {
                 "/exit" | "/quit" => {
-                    println!("Goodbye!");
+                    shutdown_requested = true;
                     break;
                 }
                 "/help" => {
@@ -199,5 +252,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // ---- Персистентный снапшот на выходе ----------------------------------
+    if shutdown_requested {
+        persist_snapshot(&agent);
+    }
+
+    // ---- Остановка фронтенд-сервера ---------------------------------------
+    let _ = frontend_shutdown_tx.send(true);
+    tracing::info!("Frontend server shut down");
+
+    println!("Goodbye!");
     Ok(())
 }

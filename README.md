@@ -20,15 +20,39 @@
  └─────────────────┘
       │
  ┌─────────────────┐
- │  ToolRouter      │ → Platform (встроенные) / Frontend (UI) / MCP (Docker контейнеры)
+ │  ToolRouter      │ → Platform (встроенные) / Frontend (WS) / MCP (Docker)
  └─────────────────┘
       │
  ┌──────────────────┐
- │  PostToolHook[]   │ ← fire-and-forget (логирование, метрики)
+ │  PostToolHook[]   │ ← fire-and-forget (логирование, метрики, WS-трансляция)
  └──────────────────┘
       │
       ▼
- ContextManager ← ветвление (git-like branching) + авто-компакция
+ ┌──────────────────┐
+ │  ContextManager   │ ← ветвление (git-like branching) + авто-компакция
+ └──────────────────┘
+      │
+      ▼
+ ┌──────────────────────────────────────────┐
+ │  Graceful Shutdown                        │
+ │  Ctrl+C → snapshot → history_dump.json   │
+ └──────────────────────────────────────────┘
+
+═══════════════════════════════════════════
+  ⚡ Parallel Execution (Orchestrator):
+  AgentCluster::execute_parallel_tasks
+    → N суб-агентов (join_all)
+    → ветки task-0..N
+    → MergeStrategy::Union
+═══════════════════════════════════════════
+
+═══════════════════════════════════════════
+  🖥  Frontend WebSocket Server
+  ws://127.0.0.1:8080/ws
+  FrontendEvent: AgentMessage | ToolExecuting
+  | ToolResult | SafetyReviewRequired
+  | ContextBranched
+═══════════════════════════════════════════
 ```
 
 ## Компоненты
@@ -43,6 +67,9 @@
 | 5 | **Safety Pipeline** | ✅ | 5 stages: Security → Egress → Adversary → Permission → Repetition |
 | 6 | **Hooks** | ✅ | PreToolUse (блокирующий) + PostToolUse (fire-and-forget через tokio::spawn) |
 | 7 | **Auto-compaction** | ✅ | CompactionConfig, needs_compaction, compact, скрытый LLM вызов |
+| 8 | **Frontend WS Server** | ✅ | axum WebSocket на 127.0.0.1:8080/ws, трансляция событий в JSON (FrontendEvent) |
+| 9 | **Orchestrator** | ✅ | `AgentCluster::execute_parallel_tasks()` — N суб-агентов через join_all, ветвление + MergeStrategy::Union |
+| 10 | **Graceful Shutdown** | ✅ | Ctrl+C → snapshot всех веток → history_dump.json → остановка фронтенд-сервера |
 
 ## Быстрый старт
 
@@ -70,6 +97,7 @@ cargo test --lib
 | `/tools` | Список зарегистрированных инструментов |
 | `/snapshot` | Снапшот всех веток |
 | `/exit` | Выход |
+| `Ctrl+C` | Graceful shutdown (snapshot + выход) |
 
 Safety-пайплайн логируется через `tracing` (stderr): `[SAFETY] Tool execution APPROVED / DENIED`.
 
@@ -84,7 +112,7 @@ Safety-пайплайн логируется через `tracing` (stderr): `[SA
 
 ## Зависимости
 
-tokio, async-trait, futures-util, tokio-util, reqwest, async-stream, serde, serde_json, thiserror, uuid, chrono, tracing, tracing-subscriber
+tokio, async-trait, futures-util, tokio-util, reqwest, async-stream, serde, serde_json, axum, tower-http, thiserror, uuid, chrono, tracing, tracing-subscriber
 
 ## MCP Контейнеры
 

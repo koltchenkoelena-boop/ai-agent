@@ -55,6 +55,7 @@ pub trait ModelProvider: Send + Sync {
 // Ollama provider — OpenAI-compatible streaming via SSE (data: lines)
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct OllamaProvider {
     client: reqwest::Client,
     base_url: String,
