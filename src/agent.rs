@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::context::ContextManager;
+use crate::context::{CompactionConfig, ContextManager};
 use crate::hooks::{PostToolHook, PreToolHook};
 use crate::memory::vector_db::VectorMemoryStore;
 use crate::provider::{ModelProvider, ProviderError};
@@ -39,6 +39,9 @@ pub enum AgentError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Execution error: {0}")]
+    Execution(String),
 
     #[error("User aborted execution")]
     UserAbort,
@@ -201,6 +204,13 @@ pub struct Agent<P: ModelProvider> {
     /// Долгосрочная векторная память (RAG). При наличии — выполняется retrieval
     /// перед каждым `stream_chat` для подмешивания релевантного контекста.
     pub memory_store: Option<Arc<VectorMemoryStore>>,
+    /// Максимальное количество шагов в цикле run().
+    /// 0 = безлимитно.
+    pub max_steps: usize,
+    /// Автоматически подтверждать все вызовы инструментов (обходить Safety).
+    pub safety_auto_approve: bool,
+    /// Конфигурация автоматической компакции контекста.
+    pub compaction_config: CompactionConfig,
 }
 
 impl<P: ModelProvider> Agent<P> {
@@ -220,6 +230,9 @@ impl<P: ModelProvider> Agent<P> {
             frontend_tx: None,
             safety_approval_rx: None,
             memory_store: None,
+            max_steps: 0,
+            safety_auto_approve: false,
+            compaction_config: CompactionConfig::default(),
         }
     }
 
@@ -451,6 +464,14 @@ impl<P: ModelProvider> Agent<P> {
                     return Err(AgentError::SafetyViolation(reason));
                 }
                 SafetyDecision::RequiresApproval(reason) => {
+                    // Auto-approve bypass
+                    if self.safety_auto_approve {
+                        tracing::info!(
+                            tool = %call.function.name,
+                            "[SAFETY] Auto-approved (safety_auto_approve=true)"
+                        );
+                        // Skip prompt — proceed
+                    } else {
                     tracing::warn!(
                         tool = %call.function.name,
                         reason = %reason,
@@ -503,6 +524,7 @@ impl<P: ModelProvider> Agent<P> {
                     if !approved {
                         return Err(AgentError::UserAbort);
                     }
+                    } // else: safety_auto_approve=false
                 }
             }
 
@@ -555,12 +577,11 @@ impl<P: ModelProvider> Agent<P> {
     ///
     /// При ошибке суммаризации просто логируем и продолжаем — это не фатально.
     async fn maybe_compact_context(&mut self, model: &str) {
-        let config = crate::context::CompactionConfig::default();
-        if !self.context.needs_compaction(&config) {
+        if !self.context.needs_compaction(&self.compaction_config) {
             return;
         }
 
-        let (start, end) = match self.context.compaction_range(&config) {
+        let (start, end) = match self.context.compaction_range(&self.compaction_config) {
             Some(r) => r,
             None => return,
         };
@@ -643,7 +664,17 @@ impl<P: ModelProvider> Agent<P> {
     }
 
     pub async fn run(&mut self, model: &str) -> Result<String, AgentError> {
+        let mut step = 0usize;
         loop {
+            step += 1;
+            if self.max_steps > 0 && step > self.max_steps {
+                tracing::warn!("Agent run exceeded max_steps ({}) — stopping", self.max_steps);
+                return Err(AgentError::Execution(format!(
+                    "Превышен лимит шагов ({})",
+                    self.max_steps,
+                )));
+            }
+
             match self.run_step(model).await {
                 Ok(Some(content)) => return Ok(content),
                 Ok(None) => {

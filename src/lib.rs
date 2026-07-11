@@ -7,3 +7,4 @@ pub mod agent;
 pub mod hooks;
 pub mod memory;
 pub mod orchestrator;
+pub mod config;

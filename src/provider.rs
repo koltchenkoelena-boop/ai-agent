@@ -154,7 +154,7 @@ impl OllamaProvider {
 // ---------------------------------------------------------------------------
 
 /// Конфигурация одного провайдера в пуле FallbackProvider.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Человеческое имя (для логов)
     pub name: String,

@@ -14,8 +14,10 @@
 
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ai_agent::agent::Agent;
+use ai_agent::config::SystemConfig;
 use ai_agent::orchestrator::AgentCluster;
 use ai_agent::provider::FallbackProvider;
 use ai_agent::tool_routing::frontend::{start_frontend_server, ClientCommand, FrontendEvent, FrontendNotifierHook};
@@ -42,6 +44,12 @@ fn persist_snapshot(agent: &Agent<FallbackProvider>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ---- --config flag: interactive config menu ---------------------------
+    if std::env::args().any(|arg| arg == "--config" || arg == "-c") {
+        ai_agent::config::run_config_menu();
+        std::process::exit(0);
+    }
+
     // ---- Трейсинг: форматированный вывод в stderr, чтобы stdout оставался чистым ----
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -58,13 +66,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("No MCP config found — skipping MCP tool discovery");
     }
 
-    // ---- Инициализация FallbackProvider из переменных окружения ------------
-    let provider = FallbackProvider::from_env();
+    // ---- Загрузка конфигурации из agent_config.json -----------------------
+    let system_cfg = SystemConfig::load();
+
+    // ---- Инициализация FallbackProvider ------------------------------------
+    // Пул из конфигурации; env-переменные AGENT_PROVIDER_POOL имеют приоритет
+    let providers = if std::env::var("AGENT_PROVIDER_POOL").is_ok() {
+        tracing::info!("AGENT_PROVIDER_POOL set — overriding config file pool");
+        ai_agent::provider::build_provider_pool()
+    } else {
+        system_cfg.provider_pool.clone()
+    };
+    let provider = FallbackProvider::new(providers, Duration::from_secs(10));
     tracing::info!(
         "Initialized FallbackProvider with {} providers",
         provider.provider_count(),
     );
     let mut agent = Agent::new(provider);
+
+    // Применяем настройки из конфигурации
+    agent.max_steps = system_cfg.max_steps_limit;
+    agent.compaction_config.max_messages = system_cfg.token_compaction_threshold;
+    agent.safety_auto_approve = system_cfg.safety_auto_approve;
+
+    if system_cfg.safety_auto_approve {
+        tracing::info!("Safety auto-approve is ON");
+    }
 
     // Регистрируем MCP-тулы (если есть конфиг)
     if let Some(ref containers) = mcp_containers {
