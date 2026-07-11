@@ -238,6 +238,10 @@ mod tests {
 
             Ok(Box::pin(stream))
         }
+
+        async fn get_embedding(&self, _text: &str) -> Result<Vec<f32>, ProviderError> {
+            Ok(vec![0.1, 0.2, 0.3, 0.4])
+        }
     }
 
     #[tokio::test]

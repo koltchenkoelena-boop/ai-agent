@@ -5,8 +5,12 @@
 //   PostToolHook  → фоновый хук после execute (логирование, метрики, память)
 // ---------------------------------------------------------------------------
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
+use crate::memory::vector_db::{VectorEntry, VectorMemoryStore};
+use crate::provider::ModelProvider;
 use crate::types::{Message, ToolCall};
 
 // ---------------------------------------------------------------------------
@@ -52,6 +56,102 @@ pub trait PostToolHook: Send + Sync {
         result: &Result<String, String>,
         context: &[Message],
     );
+}
+
+// ---------------------------------------------------------------------------
+// VectorMemoryHook — авто-индексация результатов файловых тулов
+// ---------------------------------------------------------------------------
+
+/// PostToolHook, который автоматически сохраняет результаты выполнения
+/// файловых тулов (`read_file`, `grep`) в `VectorMemoryStore` для
+/// последующего RAG-поиска.
+///
+/// При успешном завершении инструмента из списка `tool_names`:
+/// 1. Запрашивает эмбеддинг текстового результата через `provider`
+/// 2. Сохраняет `VectorEntry` в `store`
+pub struct VectorMemoryHook {
+    store: Arc<VectorMemoryStore>,
+    provider: Arc<dyn ModelProvider>,
+    tool_names: Vec<String>,
+}
+
+impl VectorMemoryHook {
+    /// Создать новый хук.
+    ///
+    /// * `store` — разделяемое хранилище эмбеддингов
+    /// * `provider` — провайдер для запроса эмбеддингов
+    /// * `tool_names` — имена тулов, результаты которых индексировать
+    pub fn new(
+        store: Arc<VectorMemoryStore>,
+        provider: Arc<dyn ModelProvider>,
+        tool_names: Vec<String>,
+    ) -> Self {
+        Self {
+            store,
+            provider,
+            tool_names,
+        }
+    }
+}
+
+#[async_trait]
+impl PostToolHook for VectorMemoryHook {
+    async fn on_post_use(
+        &self,
+        call: &ToolCall,
+        result: &Result<String, String>,
+        _context: &[Message],
+    ) {
+        // Проверяем, что тул в списке интереса
+        if !self.tool_names.contains(&call.function.name) {
+            return;
+        }
+
+        // Только успешные результаты
+        let text = match result {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        if text.is_empty() || text.len() < 20 {
+            return; // слишком короткий результат
+        }
+
+        // Обрезаем до 4096 символов для эмбеддинга
+        let trimmed = if text.len() > 4096 {
+            &text[..4096]
+        } else {
+            text.as_str()
+        };
+
+        // Запрашиваем эмбеддинг
+        let embedding = match self.provider.get_embedding(trimmed).await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("VectorMemoryHook: failed to get embedding: {e}");
+                return;
+            }
+        };
+
+        let entry = VectorEntry {
+            text: trimmed.to_string(),
+            embedding,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        if let Err(e) = self.store.insert(&entry) {
+            tracing::warn!("VectorMemoryHook: failed to insert entry: {e}");
+        } else {
+            tracing::debug!(
+                "VectorMemoryHook: indexed {} chars from tool '{}'",
+                trimmed.len(),
+                call.function.name
+            );
+        }
+    }
 }
 
 // ===========================================================================

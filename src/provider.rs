@@ -51,6 +51,11 @@ pub trait ModelProvider: Send + Sync {
         messages: Vec<Message>,
         tools: Option<Vec<ToolDefinition>>,
     ) -> Result<ProviderStream, ProviderError>;
+
+    /// Получить embedding вектора для заданного текста.
+    ///
+    /// Использует модель, указанную в `embedding_model` (например, `nomic-embed-text`).
+    async fn get_embedding(&self, text: &str) -> Result<Vec<f32>, ProviderError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,16 +112,22 @@ pub struct OllamaProvider {
     chunk_timeout: Duration,
     rotator: Option<CredentialRotator>,
     api_key: Option<String>,
+    /// Модель для эмбеддингов (например, `nomic-embed-text`).
+    /// Можно переопределить через переменную окружения `AI_AGENT_EMBEDDING_MODEL`.
+    embedding_model: String,
 }
 
 impl OllamaProvider {
     pub fn new(base_url: impl Into<String>, chunk_timeout: Duration) -> Self {
+        let embedding_model = std::env::var("AI_AGENT_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "nomic-embed-text".into());
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.into(),
             chunk_timeout,
             rotator: None,
             api_key: None,
+            embedding_model,
         }
     }
 
@@ -169,6 +180,19 @@ struct OpenAIChoice {
 struct OpenAIDelta {
     content: Option<String>,
     tool_calls: Option<Vec<ToolCallChunk>>,
+}
+
+// --- Wire types matching Ollama embedding API -----------------------------------+
+
+#[derive(Serialize)]
+struct OllamaEmbeddingRequest {
+    model: String,
+    prompt: String,
+}
+
+#[derive(Deserialize)]
+struct OllamaEmbeddingResponse {
+    embedding: Vec<f32>,
 }
 
 // --- Implementation ---------------------------------------------------------
@@ -276,5 +300,36 @@ impl ModelProvider for OllamaProvider {
         };
 
         Ok(Box::pin(stream))
+    }
+
+    async fn get_embedding(&self, text: &str) -> Result<Vec<f32>, ProviderError> {
+        // Pick base URL from the rotator (round-robin) or fall back to the fixed one.
+        let base_url = match &self.rotator {
+            Some(r) => r.get_next().unwrap_or_else(|| self.base_url.clone()),
+            None => self.base_url.clone(),
+        };
+        let url = format!("{}/api/embeddings", base_url);
+
+        let payload = OllamaEmbeddingRequest {
+            model: self.embedding_model.clone(),
+            prompt: text.to_string(),
+        };
+
+        let mut http_req = self.client.post(&url).json(&payload);
+        if let Some(ref key) = self.api_key {
+            http_req = http_req.header("Authorization", format!("Bearer {key}"));
+        }
+
+        let response = http_req.send().await?;
+
+        if !response.status().is_success() {
+            return Err(ProviderError::ApiError {
+                status: response.status().as_u16(),
+                body: response.text().await.unwrap_or_default(),
+            });
+        }
+
+        let parsed: OllamaEmbeddingResponse = response.json().await?;
+        Ok(parsed.embedding)
     }
 }

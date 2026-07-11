@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::context::ContextManager;
 use crate::hooks::{PostToolHook, PreToolHook};
+use crate::memory::vector_db::VectorMemoryStore;
 use crate::provider::{ModelProvider, ProviderError};
 use crate::safety::{default_pipeline, SafetyDecision, SafetyPipeline};
 use crate::tool_routing::frontend::{ClientCommand, FrontendEvent};
@@ -197,6 +198,9 @@ pub struct Agent<P: ModelProvider> {
     pub frontend_tx: Option<broadcast::Sender<FrontendEvent>>,
     /// Получатель команд от фронтенда (mpsc-канал из WebSocket).
     pub safety_approval_rx: Option<mpsc::Receiver<ClientCommand>>,
+    /// Долгосрочная векторная память (RAG). При наличии — выполняется retrieval
+    /// перед каждым `stream_chat` для подмешивания релевантного контекста.
+    pub memory_store: Option<Arc<VectorMemoryStore>>,
 }
 
 impl<P: ModelProvider> Agent<P> {
@@ -215,6 +219,7 @@ impl<P: ModelProvider> Agent<P> {
             post_hooks: Vec::new(),
             frontend_tx: None,
             safety_approval_rx: None,
+            memory_store: None,
         }
     }
 
@@ -280,6 +285,11 @@ impl<P: ModelProvider> Agent<P> {
         self.safety_approval_rx = Some(rx);
     }
 
+    /// Установить хранилище долгосрочной векторной памяти (RAG).
+    pub fn set_memory_store(&mut self, store: Arc<VectorMemoryStore>) {
+        self.memory_store = Some(store);
+    }
+
     /// Один шаг (итерация) цикла агента.
     ///
     /// 1. Запрос к LLM (stream_chat с текущим контекстом и определениями тулов)
@@ -294,7 +304,68 @@ impl<P: ModelProvider> Agent<P> {
             self.maybe_compact_context(model).await;
         }
 
-        let messages = self.context.current_messages().to_vec();
+        // --- Шаг 0.5: RAG retrieval из долгосрочной памяти ---
+        let extra_messages = if let Some(ref memory_store) = self.memory_store {
+            let user_content = self
+                .context
+                .current_messages()
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+                .and_then(|m| m.content.as_deref())
+                .filter(|c| !c.is_empty());
+
+            if let Some(text) = user_content {
+                match self.provider.get_embedding(text).await {
+                    Ok(embedding) => {
+                        let results = memory_store.query(&embedding, 2);
+                        let relevant: Vec<_> = results
+                            .into_iter()
+                            .filter(|entry| {
+                                let sim = crate::memory::vector_db::cosine_similarity(
+                                    &embedding,
+                                    &entry.embedding,
+                                );
+                                sim > 0.5
+                            })
+                            .collect();
+                        if !relevant.is_empty() {
+                            let facts: Vec<&str> =
+                                relevant.iter().map(|e| e.text.as_str()).collect();
+                            let summary = facts.join("\n\n---\n\n");
+                            tracing::debug!(
+                                "RAG: injected {} relevant memory fragment(s)",
+                                relevant.len()
+                            );
+                            vec![Message::new(
+                                Role::System,
+                                format!(
+                                    "[LONG-TERM MEMORY BACKGROUND]: Relevant historical facts:\n\n{summary}",
+                                ),
+                            )]
+                        } else {
+                            vec![]
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("RAG get_embedding failed: {e}");
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        let messages: Vec<Message> = if extra_messages.is_empty() {
+            self.context.current_messages().to_vec()
+        } else {
+            let mut all = extra_messages;
+            all.extend(self.context.current_messages().to_vec());
+            all
+        };
         let definitions = self.router.definitions();
         let tools = if definitions.is_empty() {
             None
@@ -633,6 +704,11 @@ mod tests {
             };
 
             Ok(Box::pin(stream))
+        }
+
+        async fn get_embedding(&self, _text: &str) -> Result<Vec<f32>, ProviderError> {
+            // Mock — возвращаем фиксированный 4-мерный вектор
+            Ok(vec![0.1, 0.2, 0.3, 0.4])
         }
     }
 
