@@ -311,6 +311,33 @@ impl Default for CompactionConfig {
 }
 
 impl ContextManager {
+    /// Приблизительная оценка количества токов в текущей ветке.
+    ///
+    /// Используется для proactive compaction: сумма длин текстового контента
+    /// и аргументов tool_calls, делённая на 4 (грубая эвристика
+    /// ~4 символа на токен для английского текста). Точность не критична —
+    /// достаточно отловить момент, когда контекст приближается к лимиту.
+    pub fn estimate_tokens(&self) -> usize {
+        self.current_branch()
+            .messages
+            .iter()
+            .map(|m| {
+                let content_len = m.content.as_ref().map(|c| c.len()).unwrap_or(0);
+                let tool_calls_len: usize = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .map(|tc| tc.function.name.len() + tc.function.arguments.len())
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                (content_len + tool_calls_len) / 4
+            })
+            .sum()
+    }
+
     /// Проверить, превышен ли лимит сообщений на текущей ветке.
     pub fn needs_compaction(&self, config: &CompactionConfig) -> bool {
         self.current_branch().messages.len() > config.max_messages
@@ -677,5 +704,50 @@ mod tests {
 
         cm.compact("Early messages.".into(), start, end);
         assert_eq!(cm.current_messages().len(), 2);
+    }
+
+    #[test]
+    fn test_estimate_tokens_empty_context() {
+        let cm = ContextManager::new();
+        assert_eq!(cm.estimate_tokens(), 0);
+    }
+
+    #[test]
+    fn test_estimate_tokens_with_content() {
+        let mut cm = ContextManager::new();
+        cm.push(user_msg("Hello, how are you?")); // ~20 chars → ~5 tokens
+        cm.push(user_msg("I am fine, thank you!")); // ~22 chars → ~5 tokens
+        // Total: ~42 chars / 4 = ~10 tokens
+        let estimate = cm.estimate_tokens();
+        assert!(estimate > 0, "estimate should be >0, got {estimate}");
+        // Rough check: 42/4 = 10.5, so 10±
+        assert!(estimate <= 15, "estimate should be ≤15, got {estimate}");
+    }
+
+    #[test]
+    fn test_estimate_tokens_with_tool_calls() {
+        let mut cm = ContextManager::new();
+        cm.push(Message::assistant(
+            Some("Let me look that up.".to_string()),
+            Some(vec![ToolCall {
+                id: "call_1".into(),
+                r#type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"test.txt"}"#.into(),
+                },
+            }]),
+        ));
+        let estimate = cm.estimate_tokens();
+        assert!(estimate > 0, "estimate should account for tool_calls, got {estimate}");
+    }
+
+    #[test]
+    fn test_estimate_tokens_grows_with_messages() {
+        let mut cm = ContextManager::new();
+        let before = cm.estimate_tokens();
+        cm.push(user_msg("A longer message that should increase the token estimate noticeably."));
+        let after = cm.estimate_tokens();
+        assert!(after > before, "estimate should grow after adding a message");
     }
 }

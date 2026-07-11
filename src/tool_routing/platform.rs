@@ -139,7 +139,8 @@ impl AsyncTool for GlobTool {
             .as_str()
             .ok_or_else(|| "missing required field 'pattern' in glob".to_string())?;
         let paths = do_glob(pattern).await?;
-        Ok(serde_json::to_string(&paths).unwrap_or_else(|_| "[]".to_string()))
+        let json = serde_json::to_string(&paths).unwrap_or_else(|_| "[]".to_string());
+        Ok(truncate_output(&json))
     }
 }
 
@@ -183,7 +184,8 @@ impl AsyncTool for GrepTool {
             .as_str()
             .ok_or_else(|| "missing required field 'pattern' in grep".to_string())?;
         let path = args["path"].as_str().unwrap_or(".");
-        do_grep(pattern, path).await
+        let result = do_grep(pattern, path).await?;
+        Ok(truncate_output(&result))
     }
 }
 
@@ -409,6 +411,35 @@ async fn do_grep(pattern: &str, path: &str) -> Result<String, String> {
 }
 
 // ===========================================================================
+// Output truncation (Step A — 413 Context Overflow mitigation)
+// ===========================================================================
+
+/// Maximum output bytes for GlobTool and GrepTool results.
+/// When exceeded, output is truncated at the character boundary and a
+/// truncation marker is appended.
+const MAX_TOOL_OUTPUT_BYTES: usize = 8192;
+
+const TRUNCATION_SUFFIX: &str = "\n\n[Output truncated at 8192 bytes]";
+
+/// Truncate `s` at the UTF-8 character boundary nearest to
+/// `MAX_TOOL_OUTPUT_BYTES` and append the truncation marker.
+/// Returns `s` unchanged when it fits within the limit.
+fn truncate_output(s: &str) -> String {
+    if s.len() <= MAX_TOOL_OUTPUT_BYTES {
+        return s.to_string();
+    }
+    let mut truncated = String::with_capacity(MAX_TOOL_OUTPUT_BYTES + TRUNCATION_SUFFIX.len());
+    for c in s.chars() {
+        if truncated.len() + c.len_utf8() > MAX_TOOL_OUTPUT_BYTES {
+            break;
+        }
+        truncated.push(c);
+    }
+    truncated.push_str(TRUNCATION_SUFFIX);
+    truncated
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -548,6 +579,98 @@ mod tests {
         let output = result.unwrap();
         assert!(output.contains("search.rs:2:"));
         assert!(output.contains("println"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // -------------------------------------------------------------------
+    // Truncation tests (Step A)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_truncate_output_short_no_change() {
+        let s = "short";
+        assert_eq!(truncate_output(s), "short");
+    }
+
+    #[test]
+    fn test_truncate_output_exactly_at_limit_no_marker() {
+        // MAX_TOOL_OUTPUT_BYTES = 8192
+        let s = "x".repeat(8192);
+        assert_eq!(truncate_output(&s).len(), 8192);
+        assert!(!truncate_output(&s).contains("truncated"));
+    }
+
+    #[test]
+    fn test_truncate_output_exceeds_limit_appends_marker() {
+        let s = "x".repeat(9000);
+        let result = truncate_output(&s);
+        assert!(result.len() < 9000);
+        assert!(result.contains("truncated at 8192"));
+    }
+
+    #[test]
+    fn test_truncate_output_respects_utf8_boundary() {
+        // UTF-8 multi-byte chars — ensure we don't split in the middle
+        let s = "é".repeat(5000); // each é is 2 bytes → 10000 bytes total
+        let result = truncate_output(&s);
+        assert!(result.contains("truncated at 8192"));
+        // Every char should be valid UTF-8 (no panic on access)
+        let _ = result.chars().count();
+    }
+
+    #[test]
+    fn test_truncate_output_empty_string() {
+        assert_eq!(truncate_output(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_glob_truncates_large_output() {
+        // Create enough files to exceed the 8KB limit
+        let dir = std::env::temp_dir().join("ai_agent_test_glob_truncate");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        // Create 500 files with long names
+        for i in 0..500 {
+            let name = format!("file_{}_with_long_name_for_truncation_test_{}.rs", i, i);
+            tokio::fs::write(dir.join(&name), "").await.unwrap();
+        }
+
+        let pattern = format!("{}/*.rs", dir.to_string_lossy());
+        let tool = GlobTool;
+        let args = serde_json::json!({ "pattern": pattern }).to_string();
+        let result = tool.execute(&args).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // Should either be small enough or contain truncation marker
+        if output.len() > 8192 {
+            assert!(output.contains("truncated at 8192"),
+                "output len={} should be truncated with marker", output.len());
+        }
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_grep_truncates_large_output() {
+        // Create a file large enough that grepping it produces >8KB output
+        let dir = std::env::temp_dir().join("ai_agent_test_grep_truncate");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let mut content = String::new();
+        for i in 0..500 {
+            content.push_str(&format!("line_{}: this is a long line with the trigger word hello world {}\n", i, i));
+        }
+        let file_path = dir.join("large.rs");
+        tokio::fs::write(&file_path, &content).await.unwrap();
+
+        let tool = GrepTool;
+        let args = serde_json::json!({ "pattern": "hello", "path": dir.to_string_lossy() }).to_string();
+        let result = tool.execute(&args).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        if output.len() > 8192 {
+            assert!(output.contains("truncated at 8192"),
+                "grep output len={} should be truncated", output.len());
+        }
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

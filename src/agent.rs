@@ -288,12 +288,28 @@ impl<P: ModelProvider> Agent<P> {
     /// 4. Если тулов нет → возвращаем `Some(content)` (финальный ответ)
     /// 5. Если есть тулы → проверка Safety → выполнение → возвращаем `None` (нужна ещё итерация)
     pub async fn run_step(&mut self, model: &str) -> Result<Option<String>, AgentError> {
+        // --- Шаг 0: proactive compaction (Step C) ---
+        if self.context.estimate_tokens() > 6000 {
+            tracing::debug!("Token estimate >6000, triggering proactive compaction");
+            self.maybe_compact_context(model).await;
+        }
+
         let messages = self.context.current_messages().to_vec();
         let definitions = self.router.definitions();
         let tools = if definitions.is_empty() {
             None
         } else {
-            Some(definitions)
+            // Step B: only send tool schemas when the model may need them.
+            // Skip when the last message is an assistant response without tool_calls
+            // (model is just continuing the conversation, doesn't need tool definitions).
+            let should_provide = self.context.current_messages().last()
+                .map(|last| last.role != Role::Assistant || last.tool_calls.is_some())
+                .unwrap_or(true);
+            if should_provide {
+                Some(definitions)
+            } else {
+                None
+            }
         };
 
         // --- Шаг 1-2: стриминг + аккумуляция ---
@@ -305,7 +321,14 @@ impl<P: ModelProvider> Agent<P> {
                 self.trim_context_for_retry();
                 let messages = self.context.current_messages().to_vec();
                 let definitions = self.router.definitions();
-                let tools = if definitions.is_empty() { None } else { Some(definitions) };
+                let should_provide = self.context.current_messages().last()
+                    .map(|last| last.role != Role::Assistant || last.tool_calls.is_some())
+                    .unwrap_or(true);
+                let tools = if definitions.is_empty() || !should_provide {
+                    None
+                } else {
+                    Some(definitions)
+                };
                 self.provider.stream_chat(model, messages, tools).await?
             }
             Err(e) => return Err(AgentError::Provider(e)),
