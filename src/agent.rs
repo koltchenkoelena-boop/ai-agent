@@ -14,6 +14,7 @@ use crate::context::ContextManager;
 use crate::hooks::{PostToolHook, PreToolHook};
 use crate::provider::{ModelProvider, ProviderError};
 use crate::safety::{default_pipeline, SafetyDecision, SafetyPipeline};
+use crate::tool_routing::platform::register_platform_tools;
 use crate::tool_routing::{AsyncTool, ToolKind, ToolRouter};
 use crate::types::*;
 
@@ -194,10 +195,11 @@ pub struct Agent<P: ModelProvider> {
 
 impl<P: ModelProvider> Agent<P> {
     /// Создать агента с переданным провайдером, пустым контекстом,
-    /// пайплайном безопасности по умолчанию, пустыми списками хуков и dummy-тулом.
+    /// пайплайном безопасности по умолчанию, пустыми списками хуков
+    /// и всеми платформенными тулами (read_file, write_file, glob, grep).
     pub fn new(provider: P) -> Self {
         let mut router = ToolRouter::new();
-        router.register(Box::new(DummyTool::new("dummy")));
+        register_platform_tools(&mut router);
         Self {
             provider,
             context: ContextManager::new(),
@@ -613,6 +615,9 @@ mod tests {
         let provider = MockProvider::new(vec![tool_chunks, response_chunks]);
 
         let mut agent = Agent::new(provider);
+        // Регистрируем dummy-тул для теста (по умолчанию Agent регистрирует
+        // read_file/write_file/glob/grep, но нам нужен предсказуемый тул)
+        agent.router.register(Box::new(DummyTool::new("dummy")));
 
         // --- Первый шаг: модель вызывает тул ---
         let result = agent.run_step("test-model").await.unwrap();
