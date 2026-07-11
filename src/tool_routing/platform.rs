@@ -28,16 +28,13 @@ impl AsyncTool for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_file".into(),
-            description: "Read the contents of a file at the specified path. \
-                          Returns the full file content as a UTF-8 string. \
-                          Use this tool to examine source files, configuration, \
-                          or any text-based file in the project.".into(),
+            description: "Read a file's content as UTF-8 text.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to the file to read"
+                        "description": "Path to the file"
                     }
                 },
                 "required": ["path"]
@@ -70,20 +67,17 @@ impl AsyncTool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "write_file".into(),
-            description: "Write content to a file at the specified path. \
-                          Creates the file if it does not exist, overwrites \
-                          if it does. Use this tool to create or modify source \
-                          files, configuration, or any text-based file.".into(),
+            description: "Write text content to a file (creates or overwrites).".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to the file to write"
+                        "description": "Path to the file"
                     },
                     "content": {
                         "type": "string",
-                        "description": "Full text content to write to the file"
+                        "description": "Text content to write"
                     }
                 },
                 "required": ["path", "content"]
@@ -120,16 +114,13 @@ impl AsyncTool for GlobTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "glob".into(),
-            description: "Find files and directories matching a glob pattern. \
-                          Supports standard glob patterns (e.g., '**/*.rs', \
-                          'src/**/mod.rs', '*.toml'). Returns a JSON array \
-                          of matching paths.".into(),
+            description: "Find files matching a glob pattern (e.g. '**/*.rs').".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Glob pattern to search for (e.g., 'src/**/*.rs')"
+                        "description": "Glob pattern (e.g. 'src/**/*.rs')"
                     }
                 },
                 "required": ["pattern"]
@@ -163,23 +154,17 @@ impl AsyncTool for GrepTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "grep".into(),
-            description: "Search for a pattern (regex or plain text) across \
-                          files in the project. If 'path' is provided, search \
-                          is limited to that directory/file; otherwise searches \
-                          the entire project. Returns matching lines with \
-                          file paths and line numbers.".into(),
+            description: "Search for a regex pattern in project files.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Regular expression or text pattern to search for"
+                        "description": "Regex or text to search for"
                     },
                     "path": {
                         "type": "string",
-                        "description": "Optional path to restrict the search scope \
-                                        (file or directory). If omitted, searches \
-                                        the entire project root."
+                        "description": "Scope path (optional, defaults to project root)"
                     }
                 },
                 "required": ["pattern"]

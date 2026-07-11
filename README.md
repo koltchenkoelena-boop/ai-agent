@@ -56,7 +56,15 @@
   ws://0.0.0.0:8080/ws
   FrontendEvent: AgentMessage | ToolExecuting
   | ToolResult | SafetyReviewRequired
-  | ContextBranched
+  | ContextBranched | Ping
+  heartbeat Ping every 30s
+═══════════════════════════════════════════
+
+═══════════════════════════════════════════
+  🔁  Context Overflow (413) Auto-Retry
+  stream_chat → match ApiError(413)
+  → trim_context_for_retry() (удаляет пару
+  tool_call + tool_result) → retry 1x
 ═══════════════════════════════════════════
 ```
 
@@ -76,6 +84,7 @@
 | 9 | **Orchestrator** | ✅ | `AgentCluster::execute_parallel_tasks()` — N суб-агентов через join_all, ветвление + MergeStrategy::Union |
 | 10 | **Graceful Shutdown** | ✅ | Ctrl+C → snapshot всех веток → history_dump.json → остановка фронтенд-сервера |
 | 11 | **Credential Rotator** | ✅ | `CredentialRotator` — thread-safe round-robin по пулу эндпоинтов; `AGENT_PROVIDER_POOL` env для конфигурации |
+| 12 | **413 Auto-Retry** | ✅ | Перехват `ProviderError::ApiError(413)` — удаление старейшей tool_call/tool_result пары + retry |
 
 ## Быстрый старт
 
@@ -83,8 +92,13 @@
 # Сборка
 cargo build --release
 
-# Запуск (требуется локальный Ollama)
-./target/release/ai-agent
+# Запуск (см. run.sh — выбор провайдера)
+./run.sh local        # локальный Ollama (по умолчанию)
+./run.sh tailscale    # сервер niceguy через Tailscale
+./run.sh openrouter   # облачные модели через OpenRouter
+
+# Короткий алиас (указан в ~/.bashrc)
+alias aa='~/workspace/ai-agent/run.sh'
 
 # Тесты
 cargo test --lib
@@ -110,6 +124,8 @@ Safety-пайплайн логируется через `tracing` (stderr): `[SA
 
 Авто-компакция контекста: при превышении лимита сообщений (по умолчанию 15) агент вызывает LLM для суммаризации старых сообщений, сохраняя последние 4 нетронутыми.
 
+**413 Context Overflow**: при ответе провайдера `API Error (Status 413)` агент автоматически удаляет старейшую пару (tool_call + tool_result) из контекста и повторяет запрос. Однократный retry.
+
 ## Переменные окружения
 
 | Переменная | По умолчанию | Описание |
@@ -118,6 +134,7 @@ Safety-пайплайн логируется через `tracing` (stderr): `[SA
 | `AGENT_PROVIDER_POOL` | — | URL-ы эндпоинтов через запятую для round-robin ротации (например, `http://host.docker.internal:11434,http://10.0.0.2:11434`) |
 | `OLLAMA_API_KEY` | — | API-ключ для Bearer-аутентификации (Ollama Cloud / OpenAI-совместимые эндпоинты) |
 | `RUST_LOG` | `info` | Уровень логирования (debug, info, warn, error) |
+| `OPENROUTER_API_KEY` | — | API-ключ OpenRouter (требуется в режиме openrouter) |
 
 ## Зависимости
 

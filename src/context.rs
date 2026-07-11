@@ -131,6 +131,20 @@ impl ContextManager {
         self.current_branch_mut().messages.extend(msgs);
     }
 
+    /// Remove a range of messages `[start..end)` from the current branch.
+    /// This is a fast‑path trim used on 413 (context overflow).
+    pub fn remove_range(&mut self, start: usize, end: usize) {
+        let branch = self.current_branch_mut();
+        if start >= branch.messages.len() {
+            return;
+        }
+        let end = end.min(branch.messages.len());
+        if start >= end {
+            return;
+        }
+        branch.messages.drain(start..end);
+    }
+
     // ---- Branches ----------------------------------------------------------
 
     /// Create a new branch forked from the current branch's tip, then switch

@@ -19,7 +19,7 @@ use std::time::Duration;
 use ai_agent::agent::Agent;
 use ai_agent::orchestrator::AgentCluster;
 use ai_agent::provider::{CredentialRotator, OllamaProvider};
-use ai_agent::tool_routing::frontend::{start_frontend_server, ClientCommand, FrontendNotifierHook};
+use ai_agent::tool_routing::frontend::{start_frontend_server, ClientCommand, FrontendEvent, FrontendNotifierHook};
 use ai_agent::tool_routing::mcp_transport::load_mcp_config;
 use ai_agent::types::*;
 use tokio::io::AsyncBufReadExt;
@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (frontend_tx, frontend_shutdown_tx, cmd_rx, safety_cmd_rx) = start_frontend_server();
     let notifier_hook = Arc::new(FrontendNotifierHook::new(frontend_tx.clone()));
     agent.add_post_hook(notifier_hook);
-    agent.set_frontend_tx(frontend_tx);
+    agent.set_frontend_tx(frontend_tx.clone());
     agent.set_safety_approval_rx(safety_cmd_rx);
 
     let model = std::env::var("AI_AGENT_MODEL").unwrap_or_else(|_| "qwen2.5:3b".into());
@@ -362,9 +362,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ── Запуск агента ───────────────────────────────────────────────
         match agent.run(model.as_str()).await {
             Ok(response) => {
+                let _ = frontend_tx.send(FrontendEvent::AgentMessage {
+                    content: response.clone(),
+                });
                 println!("\n  Assistant: {response}\n");
             }
             Err(e) => {
+                let err_msg = format!("{e}");
+                let _ = frontend_tx.send(FrontendEvent::AgentMessage {
+                    content: format!("⚠️ Error: {err_msg}"),
+                });
                 eprintln!("Error: {e}");
                 if matches!(&e, ai_agent::agent::AgentError::UserAbort) {
                     continue;

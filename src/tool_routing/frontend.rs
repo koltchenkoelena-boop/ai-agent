@@ -33,6 +33,8 @@ pub enum FrontendEvent {
     AgentMessage {
         content: String,
     },
+    /// Heartbeat — клиент игнорирует, держит соединение живым.
+    Ping,
     /// Агент начал выполнение инструмента.
     ToolExecuting {
         tool_name: String,
@@ -144,6 +146,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let cmd_tx = state.cmd_tx;
     let safety_tx = state.safety_tx;
 
+    // Heartbeat: держит WebSocket живым во время долгих LLM-инференсов.
+    let heartbeat_tx = state.tx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            interval.tick().await;
+            if heartbeat_tx.send(FrontendEvent::Ping).is_err() {
+                break;
+            }
+        }
+    });
+
     loop {
         tokio::select! {
             // broadcast → клиент
@@ -220,9 +235,13 @@ pub fn start_frontend_server() -> (
         safety_tx,
     };
 
+    let static_dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .fallback_service(get_service(ServeDir::new("static")))
+        .fallback_service(get_service(
+            ServeDir::new(static_dir).append_index_html_on_directories(true),
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

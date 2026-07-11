@@ -469,8 +469,10 @@ function handleServerEvent(data) {
     case 'safety_review_required':
       addSafetyReview(data);
       break;
+    case 'ping':
+      break;
     default:
-      addEvent('system', { content: JSON.stringify(data) });
+      if (data && data.type) console.debug('Unknown WS event type:', data.type);
   }
 }
 

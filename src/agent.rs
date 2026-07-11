@@ -297,7 +297,19 @@ impl<P: ModelProvider> Agent<P> {
         };
 
         // --- Шаг 1-2: стриминг + аккумуляция ---
-        let mut stream = self.provider.stream_chat(model, messages, tools).await?;
+        let mut stream = match self.provider.stream_chat(model, messages, tools).await {
+            Ok(s) => s,
+            Err(ProviderError::ApiError { status: 413, .. }) => {
+                // Контекст слишком большой — обрезаем и ретраим
+                tracing::warn!("Context overflow (413) — trimming and retrying");
+                self.trim_context_for_retry();
+                let messages = self.context.current_messages().to_vec();
+                let definitions = self.router.definitions();
+                let tools = if definitions.is_empty() { None } else { Some(definitions) };
+                self.provider.stream_chat(model, messages, tools).await?
+            }
+            Err(e) => return Err(AgentError::Provider(e)),
+        };
         let mut acc = StreamAccumulator::new();
 
         while let Some(chunk) = stream.next().await {
@@ -504,7 +516,38 @@ impl<P: ModelProvider> Agent<P> {
         }
     }
 
-    /// Полный цикл: вызывает `run_step` пока не получит `Some(content)`.
+    /// При 413 (контекст переполнен) — удаляем старые tool_call ↔ tool_result пары,
+    /// пока не сойдём в лимит. Простейшая стратегия: удаляем одну самую старую пару
+    /// за вызов (следующий ретрай снова попадёт сюда, если всё ещё переполнено).
+    fn trim_context_for_retry(&mut self) {
+        let msgs = self.context.current_messages().to_vec();
+
+        // Ищем первую Tool-сообщение (самый старый результат тула) и
+        // соответствующий Assistant-блок с tool_calls.
+        let tool_result_idx = msgs.iter().position(|m| m.role == Role::Tool);
+        if tool_result_idx.is_none() {
+            return;
+        }
+        let tool_result_idx = tool_result_idx.unwrap();
+
+        // Ищем предшествующий Assistant-блок с tool_calls, который идёт
+        // перед этим tool_result. Он будет tool_result_idx - 1 (если там Assistant).
+        let remove_end = tool_result_idx + 1;
+        let remove_start = if tool_result_idx > 0 && msgs[tool_result_idx - 1].role == Role::Assistant {
+            tool_result_idx - 1
+        } else {
+            tool_result_idx
+        };
+
+        tracing::info!(
+            "Trimming context: removing messages [{}, {})",
+            remove_start,
+            remove_end
+        );
+
+        self.context.remove_range(remove_start, remove_end);
+    }
+
     pub async fn run(&mut self, model: &str) -> Result<String, AgentError> {
         loop {
             match self.run_step(model).await {
