@@ -258,6 +258,9 @@ class AgentServer:
         # Session storage: keyed by "user:session_id"
         self.sessions: dict[str, list[dict]] = {}
 
+        # Abort events per session
+        self._abort_events: dict[str, asyncio.Event] = {}
+
         # Session DB (persistent SQLite)
         self.session_db: Optional[session_db.SessionDB] = None
 
@@ -366,7 +369,7 @@ class AgentServer:
 
         @app.websocket("/ws/{session_id}")
         async def websocket_chat(websocket: WebSocket, session_id: str, token: str = Query(None)):
-            """WebSocket streaming agentic chat with live tool execution."""
+            """WebSocket streaming agentic chat with live tool execution and abort support."""
             # Verify token
             username = auth.verify_token(token) if token else None
             if not username:
@@ -380,6 +383,9 @@ class AgentServer:
             if session_key not in self.sessions:
                 self.sessions[session_key] = []
 
+            # Create abort event for this session
+            self._abort_events[session_id] = asyncio.Event()
+            
             # Persist session start to DB + notify dispatcher
             model_name = self.llm_config.get("model")
             if self.session_db:
@@ -400,7 +406,8 @@ class AgentServer:
                 while True:
                     data = await websocket.receive_text()
                     msg = json.loads(data)
-                    print(f"[{self.name}] WS message ({username}): {msg['content'][:80]}")
+
+                    print(f"[{self.name}] WS message ({username}): {msg.get('content', str(msg))[:80]}")
 
                     self.sessions[session_key].append(
                         {"role": "user", "content": msg["content"], "timestamp": time.time()}
@@ -413,9 +420,16 @@ class AgentServer:
                         )
 
                     try:
-                        full_response = await self._agent_loop_streaming(
-                            self.sessions[session_key], websocket, username, session_id=session_id
+                        # Run agent loop in a task so we can still receive abort signals
+                        loop_task = asyncio.create_task(
+                            self._agent_loop_streaming(self.sessions[session_key], websocket, username, session_id=session_id)
                         )
+                        
+                        full_response, model_used = await loop_task
+                        
+                    except asyncio.CancelledError:
+                        full_response = "\n\n[user aborted]"
+                        model_used = "n/a"
                     except Exception as e:
                         error_msg = f"Ошибка: {type(e).__name__}: {e}"
                         print(f"[{self.name}] Agent loop error: {error_msg}")
@@ -423,6 +437,7 @@ class AgentServer:
                             json.dumps({"type": "chunk", "content": error_msg})
                         )
                         full_response = error_msg
+                        model_used = "n/a"
 
                     self.sessions[session_key].append(
                         {"role": "assistant", "content": full_response, "timestamp": time.time()}
@@ -435,11 +450,18 @@ class AgentServer:
                         )
 
                     await websocket.send_text(
-                        json.dumps({"type": "done", "content": full_response})
+                        json.dumps({
+                            "type": "done",
+                            "content": full_response,
+                            "model": model_used,
+                            "agent": self.name,
+                        })
                     )
 
             except WebSocketDisconnect:
                 print(f"[{self.name}] WS disconnected: user={username} session={session_id}")
+                # Clean up abort event
+                self._abort_events.pop(session_id, None)
                 # Mark session as completed in DB + notify dispatcher
                 if self.session_db:
                     await self.session_db.end_session(session_id)
@@ -479,6 +501,45 @@ class AgentServer:
                     timeout=10,
                 )
             return resp.json()
+
+        @app.post("/session/{session_id}/abort")
+        async def abort_session(session_id: str, token: str = Query(None)):
+            """Abort an in-progress agent loop for a session."""
+            username = auth.verify_token(token) if token else None
+            if not username:
+                raise HTTPException(401, "Invalid or expired token")
+            abort_event = self._abort_events.get(session_id)
+            if abort_event:
+                abort_event.set()
+                return {"status": "aborted", "session_id": session_id}
+            return {"status": "no_active_stream", "session_id": session_id}
+
+        @app.get("/session/{session_id}/messages")
+        async def get_session_messages(session_id: str, token: str = Query(None)):
+            """Get all messages for a session (для восстановления истории на фронтенде)."""
+            username = auth.verify_token(token) if token else None
+            if not username:
+                raise HTTPException(401, "Invalid or expired token")
+            if not self.session_db:
+                raise HTTPException(503, "Session DB not ready")
+            session_key = f"{username}:{session_id}"
+            # In-memory
+            msgs = self.sessions.get(session_key, [])
+            # DB
+            db_msgs = await self.session_db.get_messages(session_id)
+            # Merge: DB first, then in-memory (which may have newer ones)
+            seen = set()
+            merged = []
+            for m in db_msgs:
+                merged.append({"role": m.get("role", "unknown"), "content": m.get("content", ""), "tool_name": m.get("tool_name")})
+            for m in merged:
+                seen.add((m["role"], m.get("content", "")))
+            for m in msgs:
+                key = (m["role"], m.get("content", ""))
+                if key not in seen:
+                    merged.append(m)
+                    seen.add(key)
+            return {"session_id": session_id, "messages": merged}
 
         @app.get("/shared/files")
         async def list_shared_files():
@@ -534,8 +595,14 @@ class AgentServer:
 
     # --- Agent Loop (streaming) ---
 
-    async def _agent_loop_streaming(self, messages: list[dict], ws: WebSocket, username: str, session_id: str = None) -> str:
-        """Run agentic loop with WebSocket streaming."""
+    async def _agent_loop_streaming(self, messages: list[dict], ws: WebSocket, username: str, session_id: str = None) -> tuple[str, str]:
+        """Run agentic loop with WebSocket streaming.
+        
+        Returns (full_response_text, model_used).
+        Checks abort_event between iterations.
+        """
+        abort_event = self._abort_events.get(session_id)
+        
         memory = self._load_user_memory(username)
         system = self.system_prompt
         if memory:
@@ -545,17 +612,31 @@ class AgentServer:
             api_messages.append({"role": m["role"], "content": m["content"]})
 
         full_text_parts = []
+        model_used = ""
 
         for iteration in range(MAX_TOOL_ITERATIONS):
-            response_msg, streamed_text = await self._llm_call_stream(api_messages, ws)
+            # Check abort
+            if abort_event and abort_event.is_set():
+                abort_event.clear()
+                return "".join(full_text_parts) + "\n\n[user aborted]", model_used or "n/a"
+
+            response_msg, streamed_text, used_model = await self._llm_call_stream(api_messages, ws)
             api_messages.append(response_msg)
+            
+            if not model_used and used_model:
+                model_used = used_model
+
+            # Check abort after LLM call (quick check)
+            if abort_event and abort_event.is_set():
+                abort_event.clear()
+                return "".join(full_text_parts) + "\n\n[user aborted]", model_used or "n/a"
 
             if streamed_text:
                 full_text_parts.append(streamed_text)
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
-                return "".join(full_text_parts)
+                return "".join(full_text_parts), model_used or "n/a"
 
             # Execute tools and notify client
             for tc in tool_calls:
@@ -599,7 +680,7 @@ class AgentServer:
                     "content": result,
                 })
 
-        return "".join(full_text_parts) + "\n\n[Достигнут лимит итераций]"
+        return "".join(full_text_parts) + "\n\n[Достигнут лимит итераций]", model_used or "n/a"
 
     # --- LLM Calls ---
 
@@ -659,8 +740,8 @@ class AgentServer:
 
         raise Exception(f"All models failed: {last_error}")
 
-    async def _llm_call_stream(self, messages: list[dict], ws: WebSocket) -> tuple[dict, str]:
-        """Streaming LLM call with tool support and fallback. Returns (message_dict, streamed_text)."""
+    async def _llm_call_stream(self, messages: list[dict], ws: WebSocket) -> tuple[dict, str, str]:
+        """Streaming LLM call with tool support and fallback. Returns (message_dict, streamed_text, model_used)."""
         request_body = {
             "model": self.llm_config["model"],
             "messages": messages,
@@ -692,7 +773,7 @@ class AgentServer:
             request_body["model"] = m["model"]
             try:
                 result = await self._do_stream(request_body, ws, m["base_url"], m["api_key"])
-                return result
+                return (result[0], result[1], m["model"])
             except Exception as e:
                 last_error = e
                 if "429" in str(e) or "rate_limit" in str(e):
