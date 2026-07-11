@@ -116,6 +116,7 @@ Safety-пайплайн логируется через `tracing` (stderr): `[SA
 |-----------|-------------|----------|
 | `AI_AGENT_MODEL` | `qwen2.5:3b` | Модель Ollama для использования |
 | `AGENT_PROVIDER_POOL` | — | URL-ы эндпоинтов через запятую для round-robin ротации (например, `http://host.docker.internal:11434,http://10.0.0.2:11434`) |
+| `OLLAMA_API_KEY` | — | API-ключ для Bearer-аутентификации (Ollama Cloud / OpenAI-совместимые эндпоинты) |
 | `RUST_LOG` | `info` | Уровень логирования (debug, info, warn, error) |
 
 ## Зависимости

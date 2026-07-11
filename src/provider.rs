@@ -106,6 +106,7 @@ pub struct OllamaProvider {
     base_url: String,
     chunk_timeout: Duration,
     rotator: Option<CredentialRotator>,
+    api_key: Option<String>,
 }
 
 impl OllamaProvider {
@@ -115,6 +116,7 @@ impl OllamaProvider {
             base_url: base_url.into(),
             chunk_timeout,
             rotator: None,
+            api_key: None,
         }
     }
 
@@ -126,6 +128,12 @@ impl OllamaProvider {
     /// Attach a credential rotator for round-robin endpoint switching.
     pub fn with_rotator(mut self, rotator: CredentialRotator) -> Self {
         self.rotator = Some(rotator);
+        self
+    }
+
+    /// Set an API key for Bearer token authentication.
+    pub fn with_api_key(mut self, key: String) -> Self {
+        self.api_key = Some(key);
         self
     }
 }
@@ -198,7 +206,11 @@ impl ModelProvider for OllamaProvider {
         let mut attempts = 0usize;
         let mut delay = Duration::from_secs(2);
         let response = loop {
-            match self.client.post(&url).json(&payload).send().await {
+            let mut http_req = self.client.post(&url).json(&payload);
+            if let Some(ref key) = self.api_key {
+                http_req = http_req.header("Authorization", format!("Bearer {key}"));
+            }
+            match http_req.send().await {
                 Ok(r) if r.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
                     attempts += 1;
                     if attempts > 5 {

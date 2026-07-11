@@ -97,6 +97,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             OllamaProvider::local()
         }
     };
+
+    // ---- API-ключ для Ollama Cloud / OpenAI-совместимых эндпоинтов --------
+    let ollama = if let Ok(key) = std::env::var("OLLAMA_API_KEY") {
+        let trimmed = key.trim().to_string();
+        if !trimmed.is_empty() {
+            tracing::info!("Using OLLAMA_API_KEY for Bearer auth");
+            ollama.with_api_key(trimmed)
+        } else {
+            ollama
+        }
+    } else {
+        ollama
+    };
+
     let mut agent = Agent::new(ollama);
 
     // Регистрируем MCP-тулы (если есть конфиг)
