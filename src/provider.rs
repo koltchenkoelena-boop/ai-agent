@@ -34,6 +34,26 @@ pub enum ProviderError {
 }
 
 // ---------------------------------------------------------------------------
+// ProviderKind — формат запроса/ответа провайдера
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProviderKind {
+    /// OpenAI-compatible /v1/chat/completions (SSE `data:` lines)
+    #[serde(rename = "openai")]
+    OpenAI,
+    /// Ollama-native /api/chat (NDJSON — raw JSON lines)
+    #[serde(rename = "ollama_chat")]
+    OllamaChat,
+}
+
+impl Default for ProviderKind {
+    fn default() -> Self {
+        Self::OpenAI
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stream type alias
 // ---------------------------------------------------------------------------
 
@@ -166,6 +186,9 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     /// Поддерживает ли этот провайдер эмбеддинги (/api/embeddings)
     pub supports_embeddings: bool,
+    /// Формат взаимодействия (OpenAI / OllamaChat)
+    #[serde(default)]
+    pub kind: ProviderKind,
 }
 
 /// Собрать пул провайдеров из переменных окружения.
@@ -196,6 +219,7 @@ pub fn build_provider_pool() -> Vec<ProviderConfig> {
                     model_name: default_model.clone(),
                     api_key: ollama_api_key.clone(),
                     supports_embeddings: true,
+                    kind: ProviderKind::OpenAI,
                 });
             }
         }
@@ -213,6 +237,26 @@ pub fn build_provider_pool() -> Vec<ProviderConfig> {
                 model_name: or_model,
                 api_key: Some(key),
                 supports_embeddings: false,
+                kind: ProviderKind::OpenAI,
+            });
+        }
+    }
+
+    // 2.5. Ollama Cloud (когда задан OLLAMA_CLOUD_API_KEY)
+    if let Ok(key) = std::env::var("OLLAMA_CLOUD_API_KEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            let cloud_model = std::env::var("AI_AGENT_MODEL")
+                .unwrap_or_else(|_| "nemotron-3-super:cloud".into());
+            let cloud_base = std::env::var("OLLAMA_CLOUD_BASE_URL")
+                .unwrap_or_else(|_| "https://ollama.com".into());
+            providers.push(ProviderConfig {
+                name: "ollama-cloud".into(),
+                base_url: cloud_base,
+                model_name: cloud_model,
+                api_key: Some(key),
+                supports_embeddings: false,
+                kind: ProviderKind::OllamaChat,
             });
         }
     }
@@ -227,6 +271,7 @@ pub fn build_provider_pool() -> Vec<ProviderConfig> {
             model_name: default_model,
             api_key: ollama_api_key,
             supports_embeddings: true,
+            kind: ProviderKind::OpenAI,
         });
     }
 
@@ -280,6 +325,56 @@ fn response_to_sse_stream(
                             };
                         }
                     }
+                }
+            }
+        }
+    };
+
+    Box::pin(stream)
+}
+
+/// Преобразовать HTTP-ответ (Ollama NDJSON — одна JSON-строка на чанк) в `ProviderStream`.
+///
+/// Ollama `/api/chat` возвращает raw NDJSON:
+/// ```json
+/// {"model":"...","created_at":"...","message":{"role":"assistant","content":"..."},"done":false}
+/// {"model":"...","created_at":"...","message":{"role":"assistant","content":""},"done":true}
+/// ```
+fn response_to_ndjson_stream(
+    response: reqwest::Response,
+    chunk_timeout: Duration,
+) -> ProviderStream {
+    let reader = StreamReader::new(
+        response
+            .bytes_stream()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+    );
+    let mut lines = BufReader::new(reader).lines();
+    let timeout = chunk_timeout;
+
+    let stream = async_stream::try_stream! {
+        loop {
+            let maybe_line = tokio::time::timeout(timeout, lines.next_line())
+                .await
+                .map_err(|_| ProviderError::ChunkTimeout(timeout))?;
+
+            match maybe_line {
+                Ok(None) => break,   // EOF
+                Err(e) => Err(ProviderError::Execution(e.to_string()))?,
+                Ok(Some(line)) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    // Парсим Ollama NDJSON: {"message":{"content":"..."},"done":false}
+                    let parsed: OllamaChatChunk = serde_json::from_str(trimmed)?;
+                    if parsed.done {
+                        break;
+                    }
+                    yield ChatChunk {
+                        delta_content: Some(parsed.message.content),
+                        delta_tool_calls: None,
+                    };
                 }
             }
         }
@@ -350,7 +445,12 @@ impl ModelProvider for FallbackProvider {
             let cfg = &self.providers[idx];
 
             let base_url = cfg.base_url.trim_end_matches('/');
-            let url = format!("{base_url}/v1/chat/completions");
+
+            // ---- URL path depends on provider kind ---------------------------
+            let url = match cfg.kind {
+                ProviderKind::OpenAI => format!("{base_url}/v1/chat/completions"),
+                ProviderKind::OllamaChat => format!("{base_url}/api/chat"),
+            };
 
             // ---- Build JSON payload ------------------------------------------
             let openai_tools = tools.as_ref().map(|t| {
@@ -414,12 +514,21 @@ impl ModelProvider for FallbackProvider {
             }
 
             tracing::info!(
-                "FallbackProvider: streaming from '{}' (model: {})",
+                "FallbackProvider: streaming from '{}' (model: {}, kind: {:?})",
                 cfg.name,
                 cfg.model_name,
+                cfg.kind,
             );
 
-            return Ok(response_to_sse_stream(response, self.chunk_timeout));
+            // ---- Response parsing depends on provider kind --------------------
+            return match cfg.kind {
+                ProviderKind::OpenAI => {
+                    Ok(response_to_sse_stream(response, self.chunk_timeout))
+                }
+                ProviderKind::OllamaChat => {
+                    Ok(response_to_ndjson_stream(response, self.chunk_timeout))
+                }
+            };
         }
 
         Err(last_error)
@@ -527,6 +636,7 @@ mod tests {
                 model_name: "model-a".into(),
                 api_key: None,
                 supports_embeddings: false,
+                kind: ProviderKind::OpenAI,
             },
             ProviderConfig {
                 name: "working".into(),
@@ -534,6 +644,7 @@ mod tests {
                 model_name: "model-b".into(),
                 api_key: None,
                 supports_embeddings: false,
+                kind: ProviderKind::OpenAI,
             },
         ];
 
@@ -585,6 +696,19 @@ mod tests {
             "Pool must include local Ollama fallback"
         );
     }
+}
+
+// --- Wire types matching Ollama /api/chat NDJSON response ------------------+
+
+#[derive(Deserialize, Debug)]
+struct OllamaChatChunk {
+    message: OllamaChatMessage,
+    done: bool,
+}
+
+#[derive(Deserialize, Debug)]
+struct OllamaChatMessage {
+    content: String,
 }
 
 // --- Wire types matching OpenAI chat completions API (streaming) -----------

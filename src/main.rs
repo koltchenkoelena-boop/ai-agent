@@ -50,13 +50,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(0);
     }
 
-    // ---- Трейсинг: форматированный вывод в stderr, чтобы stdout оставался чистым ----
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // ---- Трейсинг: два слоя --------------------------------------------------
+    //   1. stderr — человекочитаемый (info+ по умолчанию)
+    //   2. chat_logs/*.jsonl — структурированный JSON для всех этапов пайплайна
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Registry;
+        use tracing_subscriber::Layer;
+
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            );
+
+        let json_layer = ai_agent::chat_log::json_file_layer("chat_logs");
+
+        let subscriber = Registry::default()
+            .with(stderr_layer)
+            .with(json_layer);
+
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("failed to set global default subscriber");
+    }
 
     // ---- MCP конфигурация (опционально) ------------------------------------
     let mcp_containers = load_mcp_config("mcp_containers.json").ok();

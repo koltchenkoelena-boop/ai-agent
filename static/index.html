@@ -138,7 +138,7 @@
       </div>
     </div>
 
-    <div class="flex flex-1 flex-col lg:flex-row overflow-hidden">
+    <div class="flex flex-1 flex-col lg:flex-row overflow-hidden pb-32">
 
       <!-- ====== LEFT: EVENT STREAM ====== -->
       <section class="flex flex-col flex-1 min-w-0 border-r-0 lg:border-r border-slate-800/60">
@@ -162,18 +162,6 @@
         <div class="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-slate-800/60 bg-slate-900/30">
           <i data-lucide="network" class="w-3.5 h-3.5 text-indigo-400"></i>
           <span class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Swarm Controller</span>
-        </div>
-        <div class="p-4 border-b border-slate-800/60">
-          <label for="taskInput" class="text-[11px] uppercase tracking-wider text-slate-500 font-semibold block mb-2">New Task</label>
-          <textarea id="taskInput" rows="3"
-            class="w-full bg-slate-900 border border-slate-700/60 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 resize-none focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-all duration-200"
-            placeholder="Describe the task for the agent swarm..."></textarea>
-          <button id="sendTaskBtn"
-            class="mt-2 w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
-            disabled>
-            <i data-lucide="send-horizonal" class="w-4 h-4"></i>
-            Launch Swarm
-          </button>
         </div>
         <div class="flex-1 p-4 overflow-y-auto">
           <div class="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-3">
@@ -283,6 +271,20 @@
   </div>
 </div>
 
+<!-- ====== FIXED PROMPT BAR ====== -->
+<div class="fixed bottom-0 left-0 right-0 z-20 flex justify-center pb-3 pt-8 bg-gradient-to-t from-slate-950 via-slate-950/95 to-transparent pointer-events-none">
+  <div class="w-full mx-4 sm:w-3/5 sm:mx-0 pointer-events-auto bg-slate-900 border border-slate-600/50 rounded-xl shadow-2xl shadow-black/30 p-2.5 flex items-end gap-2">
+    <textarea id="taskInput" rows="2"
+      class="flex-1 bg-transparent border-none text-sm text-slate-200 placeholder-slate-500 resize-none focus:outline-none leading-relaxed py-1.5 px-1.5 max-h-32"
+      placeholder="Describe the task for the agent swarm... (Enter to send, Shift+Enter for new line)"></textarea>
+    <button id="sendTaskBtn"
+      class="shrink-0 flex items-center justify-center px-3.5 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
+      disabled>
+      <i data-lucide="send-horizonal" class="w-4 h-4"></i>
+    </button>
+  </div>
+</div>
+
 <script>
 // ========================================================================
 //  UTILITY
@@ -340,6 +342,8 @@ let reconnectCountdownTimer = null;
 let reconnectAttemptCount = 0;
 let intentionalClose = false;
 let pendingSafety = null;
+let history = [];
+let historyPos = -1;
 
 // ========================================================================
 //  CONNECTION STATUS
@@ -489,6 +493,12 @@ function removePlaceholder() {
 function incrementCounter() {
   eventCount++;
   eventCountEl.textContent = `${eventCount} event${eventCount !== 1 ? 's' : ''}`;
+}
+
+function addEvent(type, data) {
+  removePlaceholder();
+  addAgentMessage({ role: data.role || type, content: data.content });
+  incrementCounter();
 }
 
 // ========================================================================
@@ -734,6 +744,9 @@ function sendTask() {
   }
   ws.send(JSON.stringify({ type: 'start_task', prompt: text }));
   addEvent('agent_message', { role: 'user', content: text });
+  // Add to history
+  history.push(text);
+  historyPos = history.length; // position after the last entry
   taskInput.value = '';
 }
 
@@ -754,9 +767,31 @@ safetyDenyBtn.addEventListener('click', () => sendSafetyResponse(false));
 
 sendTaskBtn.addEventListener('click', sendTask);
 taskInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+  if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendTask();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (history.length > 0) {
+      // Move up in history
+      if (historyPos > 0) {
+        historyPos--;
+      }
+      taskInput.value = history[historyPos];
+    }
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (history.length > 0) {
+      // Move down in history
+      if (historyPos < history.length - 1) {
+        historyPos++;
+        taskInput.value = history[historyPos];
+      } else {
+        // Past the end -> clear
+        historyPos = history.length;
+        taskInput.value = '';
+      }
+    }
   }
 });
 

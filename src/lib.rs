@@ -8,3 +8,4 @@ pub mod hooks;
 pub mod memory;
 pub mod orchestrator;
 pub mod config;
+pub mod chat_log;

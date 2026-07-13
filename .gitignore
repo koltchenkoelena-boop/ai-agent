@@ -5,3 +5,5 @@
 mcp_containers.json
 ai-agent.bin
 history_dump.json
+chat_logs/
+

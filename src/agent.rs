@@ -211,6 +211,8 @@ pub struct Agent<P: ModelProvider> {
     pub safety_auto_approve: bool,
     /// Конфигурация автоматической компакции контекста.
     pub compaction_config: CompactionConfig,
+    /// Текущий номер шага в цикле run() (для логов).
+    pub step_number: usize,
 }
 
 impl<P: ModelProvider> Agent<P> {
@@ -233,6 +235,7 @@ impl<P: ModelProvider> Agent<P> {
             max_steps: 0,
             safety_auto_approve: false,
             compaction_config: CompactionConfig::default(),
+            step_number: 0,
         }
     }
 
@@ -311,13 +314,29 @@ impl<P: ModelProvider> Agent<P> {
     /// 4. Если тулов нет → возвращаем `Some(content)` (финальный ответ)
     /// 5. Если есть тулы → проверка Safety → выполнение → возвращаем `None` (нужна ещё итерация)
     pub async fn run_step(&mut self, model: &str) -> Result<Option<String>, AgentError> {
+        let step = self.step_number;
+
         // --- Шаг 0: proactive compaction (Step C) ---
-        if self.context.estimate_tokens() > 6000 {
-            tracing::debug!("Token estimate >6000, triggering proactive compaction");
+        let token_estimate = self.context.estimate_tokens();
+        if token_estimate > 6000 {
+            tracing::info!(
+                stage = "compaction_check",
+                step,
+                token_estimate,
+                "Token estimate >6000, triggering proactive compaction"
+            );
             self.maybe_compact_context(model).await;
+        } else {
+            tracing::trace!(
+                stage = "compaction_check",
+                step,
+                token_estimate,
+                "Token estimate OK, no compaction needed"
+            );
         }
 
         // --- Шаг 0.5: RAG retrieval из долгосрочной памяти ---
+        let rag_start = std::time::Instant::now();
         let extra_messages = if let Some(ref memory_store) = self.memory_store {
             let user_content = self
                 .context
@@ -346,9 +365,16 @@ impl<P: ModelProvider> Agent<P> {
                             let facts: Vec<&str> =
                                 relevant.iter().map(|e| e.text.as_str()).collect();
                             let summary = facts.join("\n\n---\n\n");
-                            tracing::debug!(
-                                "RAG: injected {} relevant memory fragment(s)",
-                                relevant.len()
+                            let rag_elapsed = rag_start.elapsed();
+                            tracing::info!(
+                                stage = "rag_retrieval",
+                                step,
+                                query_len = text.len(),
+                                fragments_found = relevant.len(),
+                                latency_ms = rag_elapsed.as_millis() as u64,
+                                "RAG: injected {} relevant memory fragment(s) in {}ms",
+                                relevant.len(),
+                                rag_elapsed.as_millis()
                             );
                             vec![Message::new(
                                 Role::System,
@@ -361,7 +387,12 @@ impl<P: ModelProvider> Agent<P> {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("RAG get_embedding failed: {e}");
+                        tracing::warn!(
+                            stage = "rag_retrieval",
+                            step,
+                            error = %e,
+                            "RAG get_embedding failed: {e}"
+                        );
                         vec![]
                     }
                 }
@@ -397,11 +428,31 @@ impl<P: ModelProvider> Agent<P> {
         };
 
         // --- Шаг 1-2: стриминг + аккумуляция ---
+        let tools_count = tools.as_ref().map(|t| t.len()).unwrap_or(0);
+        let msg_count = messages.len();
+        tracing::info!(
+            stage = "llm_call",
+            step,
+            model,
+            msg_count,
+            tools_count,
+            "Calling LLM — {} messages, {} tool definitions",
+            msg_count,
+            tools_count,
+        );
+        let llm_start = std::time::Instant::now();
         let mut stream = match self.provider.stream_chat(model, messages, tools).await {
             Ok(s) => s,
             Err(ProviderError::ApiError { status: 413, .. }) => {
                 // Контекст слишком большой — обрезаем и ретраим
-                tracing::warn!("Context overflow (413) — trimming and retrying");
+                let elapsed = llm_start.elapsed();
+                tracing::warn!(
+                    stage = "llm_413_retry",
+                    step,
+                    latency_ms = elapsed.as_millis() as u64,
+                    "Context overflow (413) after {}ms — trimming and retrying",
+                    elapsed.as_millis()
+                );
                 self.trim_context_for_retry();
                 let messages = self.context.current_messages().to_vec();
                 let definitions = self.router.definitions();
@@ -413,30 +464,83 @@ impl<P: ModelProvider> Agent<P> {
                 } else {
                     Some(definitions)
                 };
-                self.provider.stream_chat(model, messages, tools).await?
+                let retry_start = std::time::Instant::now();
+                let result = self.provider.stream_chat(model, messages, tools).await?;
+                tracing::info!(
+                    stage = "llm_413_retry_success",
+                    step,
+                    retry_latency_ms = retry_start.elapsed().as_millis() as u64,
+                    "413 retry succeeded"
+                );
+                result
             }
             Err(e) => return Err(AgentError::Provider(e)),
         };
+        let ttfb = llm_start.elapsed();
+        let mut chunk_count = 0usize;
         let mut acc = StreamAccumulator::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
+            chunk_count += 1;
             acc.push(&chunk);
         }
 
+        let stream_elapsed = llm_start.elapsed();
         let assistant_msg = acc.into_message();
         let has_tool_calls = assistant_msg.tool_calls.is_some();
         let assistant_text = assistant_msg.content.clone(); // сохраняем для фронтенда
+        let content_len = assistant_text.as_ref().map(|c| c.len()).unwrap_or(0);
+        let tool_calls_count = assistant_msg.tool_calls.as_ref().map(|c| c.len()).unwrap_or(0);
+
+        tracing::info!(
+            stage = "llm_response",
+            step,
+            ttfb_ms = ttfb.as_millis() as u64,
+            latency_ms = stream_elapsed.as_millis() as u64,
+            chunk_count,
+            content_len,
+            tool_calls = tool_calls_count,
+            "LLM response received — {} chunks in {}ms (TTFB: {}ms), {} tool calls",
+            chunk_count,
+            stream_elapsed.as_millis(),
+            ttfb.as_millis(),
+            tool_calls_count,
+        );
 
         // --- Шаг 3: сохраняем ответ модели ---
         self.context.push(assistant_msg);
+        tracing::info!(
+            stage = "context_push",
+            step,
+            role = "assistant",
+            content_len,
+            tool_calls = tool_calls_count,
+            total_messages = self.context.current_messages().len(),
+            "Assistant message pushed to context"
+        );
 
         // --- Шаг 4: если тулов нет — финальный ответ ---
         if !has_tool_calls {
-            // Берём последнее сообщение из контекста
             let msgs = self.context.current_messages();
-            return Ok(msgs.last().and_then(|m| m.content.clone()));
+            let final_content = msgs.last().and_then(|m| m.content.clone());
+            tracing::info!(
+                stage = "decision",
+                step,
+                has_tool_calls = false,
+                content_len = final_content.as_ref().map(|c| c.len()).unwrap_or(0),
+                "No tool calls — returning final answer"
+            );
+            return Ok(final_content);
         }
+
+        tracing::info!(
+            stage = "decision",
+            step,
+            has_tool_calls = true,
+            tool_calls_count,
+            "Tool calls detected — proceeding to execution"
+        );
 
         // --- Промежуточный текст ассистента — отправляем на фронтенд ---
         if let Some(ref tx) = self.frontend_tx {
@@ -455,103 +559,163 @@ impl<P: ModelProvider> Agent<P> {
 
         for call in &mut tool_calls {
             // Safety
+            let safety_start = std::time::Instant::now();
             let decision = self
                 .safety
                 .verify(call, self.context.current_messages())
                 .await;
+            let safety_elapsed = safety_start.elapsed();
 
             match decision {
                 SafetyDecision::Allow => {
                     tracing::info!(
+                        stage = "safety",
+                        step,
                         tool = %call.function.name,
-                        "[SAFETY] Tool execution APPROVED"
+                        decision = "allow",
+                        latency_ms = safety_elapsed.as_millis() as u64,
+                        "Safety: tool '{0}' ALLOWED ({1}ms)",
+                        call.function.name,
+                        safety_elapsed.as_millis(),
                     );
                 }
-                SafetyDecision::Deny(reason) => {
+                SafetyDecision::Deny(ref reason) => {
                     tracing::error!(
+                        stage = "safety",
+                        step,
                         tool = %call.function.name,
+                        decision = "deny",
                         reason = %reason,
-                        "[SAFETY] Tool execution DENIED"
+                        latency_ms = safety_elapsed.as_millis() as u64,
+                        "Safety: tool '{0}' DENIED — {1}",
+                        call.function.name,
+                        reason,
                     );
-                    return Err(AgentError::SafetyViolation(reason));
+                    return Err(AgentError::SafetyViolation(reason.clone()));
                 }
-                SafetyDecision::RequiresApproval(reason) => {
-                    // Auto-approve bypass
+                SafetyDecision::RequiresApproval(ref reason) => {
                     if self.safety_auto_approve {
                         tracing::info!(
+                            stage = "safety",
+                            step,
                             tool = %call.function.name,
-                            "[SAFETY] Auto-approved (safety_auto_approve=true)"
+                            decision = "auto_approved",
+                            reason = %reason,
+                            latency_ms = safety_elapsed.as_millis() as u64,
+                            "Safety: tool '{0}' AUTO-APPROVED (safety_auto_approve=true)",
+                            call.function.name,
                         );
-                        // Skip prompt — proceed
                     } else {
-                    tracing::warn!(
-                        tool = %call.function.name,
-                        reason = %reason,
-                        "[SAFETY] Requires approval"
-                    );
+                        tracing::warn!(
+                            stage = "safety",
+                            step,
+                            tool = %call.function.name,
+                            decision = "requires_approval",
+                            reason = %reason,
+                            latency_ms = safety_elapsed.as_millis() as u64,
+                            "Safety: tool '{0}' REQUIRES APPROVAL — {1}",
+                            call.function.name,
+                            reason,
+                        );
 
-                    // Отправить событие фронтенду
-                    if let Some(ref tx) = self.frontend_tx {
-                        let _ = tx.send(FrontendEvent::SafetyReviewRequired {
-                            tool_name: call.function.name.clone(),
-                            reason: reason.clone(),
-                        });
-                    }
-
-                    // CLI-приглашение (всегда)
-                    println!("\n⚠️  Requires approval: {reason}");
-                    print!("Proceed? (Y/n): ");
-                    use std::io::Write;
-                    std::io::stdout().flush()?;
-
-                    // Выбор канала получения ответа
-                    let approved = if let Some(ref mut rx) = self.safety_approval_rx {
-                        tokio::select! {
-                            cmd = rx.recv() => {
-                                match cmd {
-                                    Some(ClientCommand::SafetyResponse { approved }) => approved,
-                                    _ => false,
-                                }
-                            }
-                            input = async {
-                                let mut buf = String::new();
-                                let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-                                reader.read_line(&mut buf).await.ok()?;
-                                Some(buf.trim().to_lowercase())
-                            } => {
-                                match input {
-                                    Some(s) => s != "n" && s != "no",
-                                    None => false,
-                                }
-                            }
+                        // Отправить событие фронтенду
+                        if let Some(ref tx) = self.frontend_tx {
+                            let _ = tx.send(FrontendEvent::SafetyReviewRequired {
+                                tool_name: call.function.name.clone(),
+                                reason: reason.clone(),
+                            });
                         }
-                    } else {
-                        // Нет фронтенда — только stdin
-                        let mut input = String::new();
-                        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-                        reader.read_line(&mut input).await?;
-                        input.trim().to_lowercase() != "n" && input.trim().to_lowercase() != "no"
-                    };
 
-                    if !approved {
-                        return Err(AgentError::UserAbort);
+                        // CLI-приглашение (всегда)
+                        println!("\n⚠️  Requires approval: {reason}");
+                        print!("Proceed? (Y/n): ");
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+
+                        // Выбор канала получения ответа
+                        let approved = if let Some(ref mut rx) = self.safety_approval_rx {
+                            tokio::select! {
+                                cmd = rx.recv() => {
+                                    match cmd {
+                                        Some(ClientCommand::SafetyResponse { approved }) => approved,
+                                        _ => false,
+                                    }
+                                }
+                                input = async {
+                                    let mut buf = String::new();
+                                    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+                                    reader.read_line(&mut buf).await.ok()?;
+                                    Some(buf.trim().to_lowercase())
+                                } => {
+                                    match input {
+                                        Some(s) => s != "n" && s != "no",
+                                        None => false,
+                                    }
+                                }
+                            }
+                        } else {
+                            let mut input = String::new();
+                            let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+                            reader.read_line(&mut input).await?;
+                            input.trim().to_lowercase() != "n" && input.trim().to_lowercase() != "no"
+                        };
+
+                        if !approved {
+                            tracing::info!(
+                                stage = "safety",
+                                step,
+                                tool = %call.function.name,
+                                decision = "user_rejected",
+                                "Safety: user rejected tool '{0}'",
+                                call.function.name,
+                            );
+                            return Err(AgentError::UserAbort);
+                        }
                     }
-                    } // else: safety_auto_approve=false
                 }
             }
 
             // PreToolHook — последовательный вызов всех pre_hooks
             for hook in &self.pre_hooks {
+                let hook_start = std::time::Instant::now();
                 if let Err(reason) = hook.on_pre_use(call, self.context.current_messages()).await {
+                    tracing::error!(
+                        stage = "pre_tool_hook",
+                        step,
+                        tool = %call.function.name,
+                        reason = %reason,
+                        latency_ms = hook_start.elapsed().as_millis() as u64,
+                        "PreToolHook rejected tool '{0}': {1}",
+                        call.function.name,
+                        reason,
+                    );
                     return Err(AgentError::ToolExecution(format!(
                         "PreToolHook rejected call '{}': {reason}",
                         call.function.name
                     )));
                 }
+                tracing::trace!(
+                    stage = "pre_tool_hook",
+                    step,
+                    tool = %call.function.name,
+                    latency_ms = hook_start.elapsed().as_millis() as u64,
+                    "PreToolHook passed for '{0}'",
+                    call.function.name,
+                );
             }
 
             // Исполнение
+            let exec_start = std::time::Instant::now();
+            tracing::info!(
+                stage = "tool_exec",
+                step,
+                tool = %call.function.name,
+                args = %call.function.arguments,
+                "Executing tool '{0}'",
+                call.function.name,
+            );
             let result = self.router.route(call).await;
+            let exec_elapsed = exec_start.elapsed();
 
             // PostToolHook — fire-and-forget через tokio::spawn
             for hook in &self.post_hooks {
@@ -569,9 +733,41 @@ impl<P: ModelProvider> Agent<P> {
 
             match result {
                 Ok(msg) => {
+                    let result_len = msg.content.as_ref().map(|c| c.len()).unwrap_or(0);
+                    tracing::info!(
+                        stage = "tool_result",
+                        step,
+                        tool = %call.function.name,
+                        status = "success",
+                        result_len,
+                        latency_ms = exec_elapsed.as_millis() as u64,
+                        "Tool '{0}' succeeded ({1}ms, {2} bytes)",
+                        call.function.name,
+                        exec_elapsed.as_millis(),
+                        result_len,
+                    );
                     self.context.push(msg);
+                    tracing::info!(
+                        stage = "context_push",
+                        step,
+                        role = "tool",
+                        total_messages = self.context.current_messages().len(),
+                        "Tool result pushed to context"
+                    );
                 }
                 Err(e) => {
+                    tracing::error!(
+                        stage = "tool_result",
+                        step,
+                        tool = %call.function.name,
+                        status = "error",
+                        error = %e,
+                        latency_ms = exec_elapsed.as_millis() as u64,
+                        "Tool '{0}' FAILED ({1}ms): {2}",
+                        call.function.name,
+                        exec_elapsed.as_millis(),
+                        e,
+                    );
                     return Err(AgentError::ToolExecution(e));
                 }
             }
@@ -580,6 +776,11 @@ impl<P: ModelProvider> Agent<P> {
         // --- Шаг 6: проверка компакции контекста ---
         self.maybe_compact_context(model).await;
 
+        tracing::info!(
+            stage = "run_step_end",
+            step,
+            "Step {step} complete — returning for next iteration"
+        );
         // Вернули None — сигнал, что нужна следующая итерация
         Ok(None)
     }
@@ -589,6 +790,7 @@ impl<P: ModelProvider> Agent<P> {
     ///
     /// При ошибке суммаризации просто логируем и продолжаем — это не фатально.
     async fn maybe_compact_context(&mut self, model: &str) {
+        let step = self.step_number;
         if !self.context.needs_compaction(&self.compaction_config) {
             return;
         }
@@ -597,6 +799,19 @@ impl<P: ModelProvider> Agent<P> {
             Some(r) => r,
             None => return,
         };
+
+        let msgs_to_remove = end.saturating_sub(start);
+        tracing::info!(
+            stage = "compaction",
+            step,
+            range_start = start,
+            range_end = end,
+            msgs_to_remove,
+            "Compaction triggered: removing {} messages [{}, {})",
+            msgs_to_remove,
+            start,
+            end,
+        );
 
         // Собираем сообщения для суммаризации
         let msgs_to_summarize: Vec<Message> =
@@ -613,6 +828,7 @@ impl<P: ModelProvider> Agent<P> {
         let summarize_msgs: Vec<Message> =
             std::iter::once(summary_prompt).chain(msgs_to_summarize).collect();
 
+        let compact_start = std::time::Instant::now();
         match self.provider.stream_chat(model, summarize_msgs, None).await {
             Ok(mut stream) => {
                 let mut summary = String::new();
@@ -624,21 +840,45 @@ impl<P: ModelProvider> Agent<P> {
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("Compaction chunk error: {e}");
+                            tracing::warn!(
+                                stage = "compaction",
+                                step,
+                                error = %e,
+                                "Compaction chunk error: {e}"
+                            );
                             return;
                         }
                     }
                 }
                 if !summary.is_empty() {
-                    self.context.compact(summary, start, end);
+                    let compact_elapsed = compact_start.elapsed();
+                    self.context.compact(summary.clone(), start, end);
                     tracing::info!(
-                        "Context compacted: removed {} messages",
-                        end.saturating_sub(start)
+                        stage = "compaction",
+                        step,
+                        msgs_removed = msgs_to_remove,
+                        summary_len = summary.len(),
+                        latency_ms = compact_elapsed.as_millis() as u64,
+                        "Context compacted: removed {} messages, summary {} chars in {}ms",
+                        msgs_to_remove,
+                        summary.len(),
+                        compact_elapsed.as_millis(),
+                    );
+                } else {
+                    tracing::warn!(
+                        stage = "compaction",
+                        step,
+                        "Compaction produced empty summary — skipping"
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!("Compaction summarization failed: {e}");
+                tracing::warn!(
+                    stage = "compaction",
+                    step,
+                    error = %e,
+                    "Compaction summarization failed: {e}"
+                );
             }
         }
     }
@@ -666,10 +906,13 @@ impl<P: ModelProvider> Agent<P> {
             tool_result_idx
         };
 
+        let step = self.step_number;
         tracing::info!(
-            "Trimming context: removing messages [{}, {})",
+            stage = "trim_context",
+            step,
             remove_start,
-            remove_end
+            remove_end,
+            "Trimming context: removing messages [{remove_start}, {remove_end})"
         );
 
         self.context.remove_range(remove_start, remove_end);
@@ -677,8 +920,19 @@ impl<P: ModelProvider> Agent<P> {
 
     pub async fn run(&mut self, model: &str) -> Result<String, AgentError> {
         let mut step = 0usize;
+        let run_start = std::time::Instant::now();
         loop {
             step += 1;
+            self.step_number = step;
+
+            tracing::info!(
+                stage = "run_iteration",
+                step,
+                model,
+                msg_count = self.context.current_messages().len(),
+                "Agent run iteration start"
+            );
+
             if self.max_steps > 0 && step > self.max_steps {
                 tracing::warn!("Agent run exceeded max_steps ({}) — stopping", self.max_steps);
                 return Err(AgentError::Execution(format!(
@@ -688,12 +942,35 @@ impl<P: ModelProvider> Agent<P> {
             }
 
             match self.run_step(model).await {
-                Ok(Some(content)) => return Ok(content),
-                Ok(None) => {
-                    // Есть tool_calls — продолжаем цикл
-                    tracing::debug!("Agent loop iteration — tool calls detected, continuing");
+                Ok(Some(content)) => {
+                    let elapsed = run_start.elapsed();
+                    tracing::info!(
+                        stage = "run_complete",
+                        step,
+                        content_len = content.len(),
+                        latency_ms = elapsed.as_millis() as u64,
+                        "Agent run complete — final answer"
+                    );
+                    return Ok(content);
                 }
-                Err(e) => return Err(e),
+                Ok(None) => {
+                    tracing::info!(
+                        stage = "run_continue",
+                        step,
+                        "Tool calls detected — continuing iteration"
+                    );
+                }
+                Err(e) => {
+                    let elapsed = run_start.elapsed();
+                    tracing::error!(
+                        stage = "run_error",
+                        step,
+                        error = %e,
+                        latency_ms = elapsed.as_millis() as u64,
+                        "Agent run error"
+                    );
+                    return Err(e);
+                }
             }
         }
     }

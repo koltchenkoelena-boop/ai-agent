@@ -73,15 +73,32 @@ impl SafetyPipeline {
             let decision = stage.inspect(call, context).await;
             match decision {
                 SafetyDecision::Allow => {
-                    tracing::trace!(stage = stage.name(), tool = %call.function.name, "allow");
+                    tracing::trace!(
+                        stage = stage.name(),
+                        tool = %call.function.name,
+                        tool_args = %call.function.arguments,
+                        "allow",
+                    );
                     continue;
                 }
                 SafetyDecision::Deny(ref reason) => {
-                    tracing::warn!(stage = stage.name(), tool = %call.function.name, reason, "deny");
+                    tracing::warn!(
+                        stage = stage.name(),
+                        tool = %call.function.name,
+                        tool_args = %call.function.arguments,
+                        reason,
+                        "deny",
+                    );
                     return decision;
                 }
                 SafetyDecision::RequiresApproval(ref reason) => {
-                    tracing::info!(stage = stage.name(), tool = %call.function.name, reason, "requires_approval");
+                    tracing::info!(
+                        stage = stage.name(),
+                        tool = %call.function.name,
+                        tool_args = %call.function.arguments,
+                        reason,
+                        "requires_approval",
+                    );
                     return decision;
                 }
             }

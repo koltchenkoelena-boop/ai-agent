@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use dialoguer::{Input, Select};
 
-use crate::provider::ProviderConfig;
+use crate::provider::{ProviderConfig, ProviderKind};
 
 // ---------------------------------------------------------------------------
 // Конфигурация системы
@@ -41,6 +41,7 @@ impl Default for SystemConfig {
                     .unwrap_or_else(|_| "qwen2.5-coder:7b".into()),
                 api_key: std::env::var("OLLAMA_API_KEY").ok().filter(|k| !k.is_empty()),
                 supports_embeddings: true,
+                kind: ProviderKind::OpenAI,
             }],
             max_steps_limit: 0,
             token_compaction_threshold: 15,
@@ -231,6 +232,7 @@ fn edit_providers(cfg: &mut SystemConfig) {
                 model_name,
                 api_key: if api_key.is_empty() { None } else { Some(api_key) },
                 supports_embeddings,
+                kind: ProviderKind::OpenAI,
             });
             println!("\n  ✓ Провайдер добавлен");
             pause();

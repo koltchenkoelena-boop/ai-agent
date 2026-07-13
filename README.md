@@ -93,9 +93,10 @@
 cargo build --release
 
 # Запуск (см. run.sh — выбор провайдера)
-./run.sh local        # локальный Ollama (по умолчанию)
+./run.sh local        # локальный Ollama (по умолчанию, http://localhost:11434)
 ./run.sh tailscale    # сервер niceguy через Tailscale
 ./run.sh openrouter   # облачные модели через OpenRouter
+./run.sh cloud        # Ollama Cloud (ollama.com, нужен OLLAMA_CLOUD_API_KEY)
 
 # Короткий алиас (указан в ~/.bashrc)
 alias aa='~/workspace/ai-agent/run.sh'
@@ -103,6 +104,72 @@ alias aa='~/workspace/ai-agent/run.sh'
 # Тесты
 cargo test --lib
 ```
+
+## Режимы провайдеров
+
+| Режим | Команда | Провайдер | Аутентификация |
+|-------|---------|-----------|----------------|
+| Локальный | `./run.sh local` | `http://localhost:11434` (Ollama) | — |
+| Tailscale | `./run.sh tailscale` | `https://niceguy-1.tail349e77.ts.net/ollama` | `OLLAMA_API_KEY=ollama` |
+| OpenRouter | `./run.sh openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| Ollama Cloud | `./run.sh cloud` | `https://ollama.com` | `OLLAMA_CLOUD_API_KEY` |
+
+При запуске через `run.sh` переменные окружения выставляются автоматически.
+Без `run.sh` можно задать пул провайдеров вручную через `AGENT_PROVIDER_POOL` (см. Credential Rotator).
+
+### Ollama Cloud (Native)
+
+Режим `./run.sh cloud` встраивает прокси с API-ключом прямо в бинарник — внешний Python-прокси не нужен.
+
+- Отправляет запрос напрямую на `https://ollama.com/api/chat` с Bearer-аутентификацией
+- Парсит NDJSON-ответ Ollama (в отличие от OpenAI SSE)
+- Модель по умолчанию: `nemotron-3-super:cloud`
+- Ключ задаётся через `OLLAMA_CLOUD_API_KEY`:
+
+```bash
+export OLLAMA_CLOUD_API_KEY="fd62069eede24555a8d5743dc1b8f9ae.XnkOyaZMGjgd4mpzR5cOCM3W"
+./run.sh cloud
+```
+
+Внутренняя реализация: `ProviderKind::OllamaChat` — новый вариант в `ProviderConfig`, который
+маршрутизируется в `FallbackProvider::stream_chat()` на `/api/chat` + NDJSON-парсер вместо
+стандартного OpenAI `/v1/chat/completions` + SSE-парсера.
+
+## Chat Logging (NDJSON)
+
+При каждом запуске агент создаёт файл лога в директории `chat_logs/`:
+
+```
+chat_logs/2026-07-14_00-27-58.jsonl
+```
+
+Формат — NDJSON (JSON Lines), одна строка = одно событие пайплайна.
+Все стадии жизненного цикла записываются с метриками:
+
+| Событие | stage | Описание |
+|---------|-------|----------|
+| `run_iteration` | — | Начало итерации агента |
+| `llm_call` | — | Отправка запроса провайдеру (кол-во сообщений, оценка токенов) |
+| `llm_response` | — | Получен ответ от LLM (TTFB, latency, кол-во вызовов тулов) |
+| `safety` | security/egress/adversary/permission/repetition | Результат проверки safety-эшелона |
+| `pre_tool_hook` | — | Вызов pre-tool хука |
+| `tool_exec` | — | Начало выполнения тула (имя, аргументы) |
+| `tool_result` | — | Результат выполнения тула (latency, успех/ошибка) |
+| `context_push` | — | Добавление сообщения в контекст (роль, оценка токенов) |
+| `decision` | — | Решение агента (action: continue / wait_for_confirmation / max_steps_reached) |
+| `compaction_check` | — | Проверка необходимости авто-компакции |
+| `compaction` | — | Выполнена авто-компакция контекста |
+| `run_complete` | — | Завершение цикла агента (шагов, ошибок, длительность) |
+
+Пример строки лога:
+
+```json
+{"timestamp":"2026-07-14T00:27:58.123456+03:00","level":"INFO","fields":{"stage":"llm_call","step":1,"msg_count":5,"token_estimate":3840},"target":"ai_agent::agent","span":{"name":"run_step","step":1}}
+```
+
+Логи пишутся через `tracing` с кастомным `MakeWriter` в два слоя:
+- **stderr** — human-readable формат (цветной, с уровнями)
+- **JSON Lines** — машинно-читаемый файл для анализа и отладки
 
 ## Интерактивный CLI
 
@@ -133,6 +200,8 @@ Safety-пайплайн логируется через `tracing` (stderr): `[SA
 | `AI_AGENT_MODEL` | `qwen2.5:3b` | Модель Ollama для использования |
 | `AGENT_PROVIDER_POOL` | — | URL-ы эндпоинтов через запятую для round-robin ротации (например, `http://host.docker.internal:11434,http://10.0.0.2:11434`) |
 | `OLLAMA_API_KEY` | — | API-ключ для Bearer-аутентификации (Ollama Cloud / OpenAI-совместимые эндпоинты) |
+| `OLLAMA_CLOUD_API_KEY` | — | API-ключ Ollama Cloud (режим `cloud`, Bearer auth на `https://ollama.com/api/chat`) |
+| `OLLAMA_CLOUD_BASE_URL` | `https://ollama.com` | Базовый URL для Ollama Cloud API |
 | `RUST_LOG` | `info` | Уровень логирования (debug, info, warn, error) |
 | `OPENROUTER_API_KEY` | — | API-ключ OpenRouter (требуется в режиме openrouter) |
 
