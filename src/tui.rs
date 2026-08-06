@@ -278,6 +278,7 @@ struct App {
     status: String,
     branch: String,
     running: bool,
+    started_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -289,6 +290,7 @@ impl App {
             status: format!("{model} · ветка {branch} · тулы {tool_count}"),
             branch: branch.to_string(),
             running: false,
+            started_at: None,
         };
         app.push(UILine::plain(
             "AI Agent TUI (стиль grok-build). /help — команды, Enter — отправить, Ctrl+C — выход.",
@@ -338,9 +340,18 @@ impl App {
             chunks[1].y + 1,
         ));
 
+        let status_text = if self.running {
+            if let Some(t) = self.started_at {
+                format!("{} · думает… {}s", self.status, t.elapsed().as_secs())
+            } else {
+                format!("{} · думает…", self.status)
+            }
+        } else {
+            self.status.clone()
+        };
         let status = Paragraph::new(Line::from(vec![
             Span::styled("◆", Style::default().fg(if self.running { palette::OK } else { palette::ACCENT })),
-            Span::styled(format!("  {}", self.status), Style::default().fg(palette::MUTED)),
+            Span::styled(format!("  {status_text}"), Style::default().fg(palette::MUTED)),
         ]))
         .alignment(Alignment::Left)
         .style(Style::default().bg(palette::BG_STORM));
@@ -490,6 +501,7 @@ pub async fn run_tui(
 
                                 // ---- обычный запрос к агенту -----------------------
                                 app.running = true;
+                                app.started_at = Some(std::time::Instant::now());
                                 app.status = format!("{model} · работает…");
                                 let a2 = agent.clone();
                                 let m2 = model.clone();
@@ -534,6 +546,7 @@ pub async fn run_tui(
             }
             Some((line, err)) = result_rx.recv() => {
                 app.running = false;
+                app.started_at = None;
                 app.status = format!("{model} · ветка {}", app.branch);
                 if !line.is_empty() {
                     app.push(UILine::plain("  🤖", palette::ACCENT));
