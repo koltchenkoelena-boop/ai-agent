@@ -389,9 +389,16 @@ pub async fn run_tui(
                                     let arg = cmd_parts.next().unwrap_or("").trim();
                                     match cmd {
                                         "/help" => {
-                                            app.push(UILine::plain(
-                                                "  /help /tools /branch [name] /clear /plan <file.luck> /quit",
-                                                palette::MUTED));
+                                            app.push(UILine::plain("  Команды:", palette::ACCENT));
+                                            app.push(UILine::plain("  <текст> — обычный запрос к модели (Enter отправляет)", palette::TEXT));
+                                            app.push(UILine::plain("  /plan <file.luck> — скомпилировать и ИСПОЛНИТЬ план", palette::TEXT));
+                                            app.push(UILine::plain("      пример: /plan examples/demo.luck", palette::MUTED));
+                                            app.push(UILine::plain("  /tools — список зарегистрированных тулов", palette::TEXT));
+                                            app.push(UILine::plain("  /branch — список веток контекста", palette::TEXT));
+                                            app.push(UILine::plain("  /branch <name> — переключиться на ветку", palette::TEXT));
+                                            app.push(UILine::plain("  /clear — очистить экран", palette::TEXT));
+                                            app.push(UILine::plain("  /quit — выход (или Ctrl+C)", palette::TEXT));
+                                            app.push(UILine::plain("  ↑/↓ — история, PageUp/PageDown — скролл", palette::MUTED));
                                         }
                                         "/tools" => {
                                             for t in &tools { app.push(UILine::plain(format!("  • {t}"), palette::TEXT)); }
