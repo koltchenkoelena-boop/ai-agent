@@ -59,11 +59,29 @@ struct PartialToolCall {
     arguments: String,
 }
 
-/// Аккумулирует чанки стрима в готовое `Message`.
-///
-/// Чанки могут содержать как текстовый контент (delta_content),
-/// так и фрагменты tool_calls (delta_tool_calls с index).
-#[derive(Debug)]
+/// Убрать блоки <think>...</think> из текста модели (reasoning-мусор).
+fn strip_think(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        match rest.find("<think") {
+            Some(start) => {
+                out.push_str(&rest[..start]);
+                let after = &rest[start..];
+                match after.find("</think>") {
+                    Some(end) => rest = &after[end + 8..],
+                    None => break, // незакрытый блок — отбрасываем хвост
+                }
+            }
+            None => {
+                out.push_str(rest);
+                break;
+            }
+        }
+    }
+    out
+}
+
 pub struct StreamAccumulator {
     pub content: String,
     partial_calls: HashMap<usize, PartialToolCall>,
@@ -487,7 +505,14 @@ impl<P: ModelProvider> Agent<P> {
         }
 
         let stream_elapsed = llm_start.elapsed();
-        let assistant_msg = acc.into_message();
+        let mut assistant_msg = acc.into_message();
+        // Фильтр дума-блоков: <think>...</think> (некоторые бэкенды шлют reasoning в content).
+        if let Some(c) = assistant_msg.content.take() {
+            let clean = strip_think(&c).trim().to_string();
+            if !clean.is_empty() {
+                assistant_msg.content = Some(clean);
+            }
+        }
         let has_tool_calls = assistant_msg.tool_calls.is_some();
         let assistant_text = assistant_msg.content.clone(); // сохраняем для фронтенда
         let content_len = assistant_text.as_ref().map(|c| c.len()).unwrap_or(0);

@@ -207,7 +207,14 @@ impl<R: PlanRuntime> PlanExecutor<R> {
                 continue;
             };
             self.emit(PlanEvent::NodeStart { id: id.clone() }).await;
-            match self.execute_node(plan, node).await {
+            // Таймаут узла: генерация/тул не должны висеть вечно (kimi/minimax бывают медленными).
+            let exec = self.execute_node(plan, node);
+            let timed = tokio::time::timeout(std::time::Duration::from_secs(120), exec).await;
+            let node_result = match timed {
+                Ok(r) => r,
+                Err(_) => Err(format!("node {} timed out (120s)", node.id)),
+            };
+            match node_result {
                 Ok(()) => {
                     self.emit(PlanEvent::NodeDone { id: id.clone(), ok: true }).await;
                 }
