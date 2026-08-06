@@ -215,6 +215,88 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 // Запуск сервера
 // ---------------------------------------------------------------------------
 
+/// Пытается освободить порт, убивая процесс, который его слушает.
+///
+/// Сначала SIGTERM (graceful shutdown), затем SIGKILL через 500 мс, если процесс жив.
+/// Поддерживает Linux (fuser → lsof → ss). На других платформах — no-op.
+/// Возвращает true, если порт удалось освободить (или не был занят).
+fn free_port_local(port: u16) -> bool {
+    use std::process::Command;
+    use std::time::Duration;
+
+    /// Найти PID процесса, слушающего TCP-порт.
+    fn find_pid(port: u16) -> Option<i32> {
+        // fuser - самый быстрый и точный (есть в psmisc, почти везде)
+        let out = Command::new("fuser")
+            .arg(format!("{port}/tcp"))
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return stdout
+                .split_whitespace()
+                .last()
+                .and_then(|s| s.parse::<i32>().ok());
+        }
+
+        // lsof -ti :PORT (fallback 1)
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("lsof -ti :{port} 2>/dev/null"))
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return stdout.trim().split('\n').last().and_then(|s| s.parse::<i32>().ok());
+        }
+
+        // ss -tlnp (fallback 2)
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("ss -tlnp sport = :{port} 2>/dev/null | grep -oP 'pid=\\K\\d+'"))
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return stdout.trim().split('\n').last().and_then(|s| s.parse::<i32>().ok());
+        }
+
+        None
+    }
+
+    fn is_alive(pid: i32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    let pid = match find_pid(port) {
+        Some(pid) => pid,
+        None => return true, // порт свободен
+    };
+
+    tracing::warn!("Port {port} is occupied by PID {pid}, sending SIGTERM...");
+
+    let _ = Command::new("kill")
+        .arg(pid.to_string())
+        .status();
+
+    // Даём время на graceful shutdown
+    std::thread::sleep(Duration::from_millis(500));
+
+    if is_alive(pid) {
+        tracing::warn!("PID {pid} still alive, sending SIGKILL");
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    !is_alive(pid)
+}
+
 /// Запускает WebSocket-сервер + статику на `0.0.0.0:8080`.
 ///
 /// Возвращает:
@@ -222,6 +304,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// - `watch::Sender<bool>` — graceful shutdown
 /// - `mpsc::Receiver<ClientCommand>` — команды задач (StartTask, SwitchBranch) от фронтенда
 /// - `mpsc::Receiver<ClientCommand>` — safety-ответы (SafetyResponse) от фронтенда
+/// Только каналы событий/команд, без HTTP-сервера — для TUI/headless-режимов.
+/// Не занимает порт, не убивает процессы.
+pub fn frontend_channels() -> (
+    broadcast::Sender<FrontendEvent>,
+    watch::Sender<bool>,
+    mpsc::Receiver<ClientCommand>,
+    mpsc::Receiver<ClientCommand>,
+) {
+    let (tx, _rx) = broadcast::channel(256);
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (_safety_tx, safety_rx) = mpsc::channel(32);
+    (tx, shutdown_tx, cmd_rx, safety_rx)
+}
+
 pub fn start_frontend_server() -> (
     broadcast::Sender<FrontendEvent>,
     watch::Sender<bool>,
@@ -255,6 +352,9 @@ pub fn start_frontend_server() -> (
         .with_state(state);
 
     tokio::spawn(async move {
+        // Освободить порт, если его занял зависший процесс предыдущего запуска
+        free_port_local(8080);
+
         let listener = match tokio::net::TcpListener::bind("0.0.0.0:8080").await {
             Ok(l) => l,
             Err(e) => {

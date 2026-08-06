@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tui_mode = std::env::args().any(|arg| arg == "--tui");
 
     // ---- Трейсинг: два слоя --------------------------------------------------
-    //   1. stderr — человекочитаемый (info+ по умолчанию)
+    //   1. stderr — человекочитаемый (info+ по умолчанию); в TUI-режиме — в logs/tui.log
     //   2. chat_logs/*.jsonl — структурированный JSON для всех этапов пайплайна
     {
         use tracing_subscriber::layer::SubscriberExt;
@@ -67,14 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|_| "info".into()),
             );
 
+        // TUI: stderr-слой выключен (raw-режим рисует stderr поверх экрана).
+        // Option<L> реализует Layer — тип не меняется между ветками.
+        let stderr_opt: Option<_> = if tui_mode { None } else { Some(stderr_layer) };
+
         let json_layer = ai_agent::chat_log::json_file_layer("chat_logs");
 
-        let subscriber = if tui_mode {
-            // TUI: без stderr-слоя (raw-режим рисует stderr поверх экрана).
-            Registry::default().with(json_layer)
-        } else {
-            Registry::default().with(stderr_layer).with(json_layer)
-        };
+        let subscriber = Registry::default()
+            .with(stderr_opt)
+            .with(json_layer);
 
         tracing::subscriber::set_global_default(subscriber)
             .expect("failed to set global default subscriber");
@@ -128,8 +129,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          files in the project directory.",
     ));
 
-    // ---- Запуск фронтенд-сервера (WebSocket + статика, 0.0.0.0:8080) ------
-    let (frontend_tx, frontend_shutdown_tx, cmd_rx, safety_cmd_rx) = start_frontend_server();
+    // ---- Запуск фронтенда -------------------------------------------------
+    // TUI: только каналы (без HTTP/порта); веб: полный WebSocket-сервер на 8080.
+    let (frontend_tx, frontend_shutdown_tx, cmd_rx, safety_cmd_rx) = if tui_mode {
+        ai_agent::tool_routing::frontend::frontend_channels()
+    } else {
+        start_frontend_server()
+    };
     let notifier_hook = Arc::new(FrontendNotifierHook::new(frontend_tx.clone()));
     agent.add_post_hook(notifier_hook);
     agent.set_frontend_tx(frontend_tx.clone());
