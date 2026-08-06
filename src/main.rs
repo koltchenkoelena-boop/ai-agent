@@ -136,6 +136,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model_name: model.clone(),
     });
 
+    // ---- TUI-режим (--tui): полноэкранный интерфейс в стиле grok-build ------
+    if std::env::args().any(|arg| arg == "--tui") {
+        let agent = Arc::new(tokio::sync::Mutex::new(agent));
+        ai_agent::tui::run_tui(agent, model.clone(), frontend_tx.clone()).await?;
+        return Ok(());
+    }
+
     // ---- Приветствие -------------------------------------------------------
     println!();
     println!("╔══════════════════════════════════════════════╗");

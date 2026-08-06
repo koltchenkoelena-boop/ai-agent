@@ -22,6 +22,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "regis
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 dialoguer = "0.11"
+rustfft = "6.0"
+num-complex = "0.4"
+
+# TUI (фронт в стиле grok-build; палитра groknight, см. src/tui.rs)
+ratatui = { version = "0.29", features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+textwrap = "0.16"
+unicode-width = "0.2"
 
 [profile.release]
 opt-level = 3
