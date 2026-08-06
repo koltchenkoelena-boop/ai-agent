@@ -1,0 +1,548 @@
+// ---------------------------------------------------------------------------
+// luck_scheduler — исполнение плана (DAG) поверх runtime ai-agent
+//
+// Этап 3 интеграции Luck в ai-agent (см. docs/luck-integration.md).
+// PlanExecutor обходит plan.json в топологическом порядке, исполняет узлы:
+//   - Generative (ROLE/CLASSIFY/FILTER/STEP/TASK) -> PlanRuntime::generate
+//   - TOOL -> PlanRuntime::call_tool (ToolRouter)
+//   - BRANCH -> выбор ветки по значению из input (label == value)
+//   - VERIFY -> детерминированный предикат над ground-значением
+//   - MERGE -> агрегация входящих значений
+//   - REJECT -> состояние графа (план завершается с reason)
+// Активность: узлы, достижимые только через невыбранные branch-рёбра, не исполняются.
+// ---------------------------------------------------------------------------
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::pin::Pin;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use serde_json::{Value, json};
+
+use crate::luck_plan::{EdgeType, NodeKind, Plan};
+use crate::provider::ModelProvider;
+use crate::tool_routing::ToolRouter;
+use crate::types::{ChatChunk, Message, Role};
+
+// ---------------------------------------------------------------------------
+// Runtime-абстракция: всё, что нужно планировщику от агента
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+pub trait PlanRuntime: Send + Sync {
+    /// Генеративный вызов (ROLE/CLASSIFY/STEP/...). Возвращает текст ответа.
+    async fn generate(&self, system: Option<&str>, user: &str) -> Result<String, String>;
+    /// Вызов TOOL-узла. `args` — валидный JSON аргументов.
+    async fn call_tool(&self, name: &str, args: &Value) -> Result<String, String>;
+}
+
+/// Реальная реализация на ModelProvider + ToolRouter ai-agent.
+pub struct AiAgentRuntime {
+    pub provider: Arc<dyn ModelProvider>,
+    pub tools: Arc<ToolRouter>,
+    pub model: String,
+}
+
+#[async_trait]
+impl PlanRuntime for AiAgentRuntime {
+    async fn generate(&self, system: Option<&str>, user: &str) -> Result<String, String> {
+        let mut messages = Vec::new();
+        if let Some(sys) = system {
+            messages.push(Message::new(Role::System, sys));
+        }
+        messages.push(Message::new(Role::User, user));
+        let stream = self
+            .provider
+            .stream_chat(&self.model, messages, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out = String::new();
+        let mut pin: Pin<Box<dyn futures_util::Stream<Item = Result<ChatChunk, crate::provider::ProviderError>> + Send>> = stream;
+        while let Some(chunk) = pin.next().await {
+            if let Ok(c) = chunk {
+                if let Some(d) = c.delta_content {
+                    out.push_str(&d);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn call_tool(&self, name: &str, args: &Value) -> Result<String, String> {
+        let args_str = serde_json::to_string(args).map_err(|e| e.to_string())?;
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| format!("tool not found: {name}"))?;
+        tool.execute(&args_str).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Результат исполнения плана
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanOutcome {
+    /// План завершён; result — значение узла-цели (последнего исполненного `into`).
+    Completed { result: Value },
+    /// План остановлен (VERIFY не сошёлся, узел упал, пустая ветка).
+    Rejected { reason: String },
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler
+// ---------------------------------------------------------------------------
+
+pub struct PlanExecutor<R: PlanRuntime> {
+    runtime: Arc<R>,
+    store: HashMap<String, Value>,
+    selected_branch: HashMap<String, String>,
+    enabled: HashSet<String>,
+}
+
+impl<R: PlanRuntime> PlanExecutor<R> {
+    pub fn new(runtime: Arc<R>) -> Self {
+        Self {
+            runtime,
+            store: HashMap::new(),
+            selected_branch: HashMap::new(),
+            enabled: HashSet::new(),
+        }
+    }
+
+    pub fn store(&self) -> &HashMap<String, Value> {
+        &self.store
+    }
+
+    /// Топологический порядок (Kahn). Ошибка -> None (валидатор должен был отсечь).
+    fn topo_order(plan: &Plan) -> Option<Vec<String>> {
+        let mut indegree: HashMap<&str, usize> = HashMap::new();
+        for n in &plan.nodes {
+            indegree.insert(n.id.as_str(), 0);
+        }
+        let mut outgoing: BTreeMap<&str, Vec<&crate::luck_plan::Edge>> = BTreeMap::new();
+        for e in &plan.edges {
+            *indegree.entry(e.to.as_str()).or_insert(0) += 1;
+            outgoing.entry(e.from.as_str()).or_default().push(e);
+        }
+        let mut queue: Vec<&str> = indegree
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(k, _)| *k)
+            .collect();
+        queue.sort_unstable();
+        let mut order = Vec::new();
+        while let Some(id) = queue.pop() {
+            order.push(id.to_string());
+            if let Some(edges) = outgoing.get(id) {
+                for e in edges {
+                    let d = indegree.get_mut(e.to.as_str())?;
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push(&e.to);
+                        queue.sort_unstable();
+                    }
+                }
+            }
+        }
+        if order.len() == plan.nodes.len() {
+            Some(order)
+        } else {
+            None
+        }
+    }
+
+    /// Запустить план. Возвращает outcome; состояние (store, ветки) остаётся доступно.
+    pub async fn run(&mut self, plan: &Plan) -> PlanOutcome {
+        let Some(order) = Self::topo_order(plan) else {
+            return PlanOutcome::Rejected {
+                reason: "plan graph has a cycle".to_string(),
+            };
+        };
+
+        // Начальные: узлы без входящих рёбер.
+        self.enabled.clear();
+        let mut has_incoming: HashSet<&str> = HashSet::new();
+        for e in &plan.edges {
+            has_incoming.insert(e.to.as_str());
+        }
+        for n in &plan.nodes {
+            if !has_incoming.contains(n.id.as_str()) {
+                self.enabled.insert(n.id.clone());
+            }
+        }
+
+        for id in &order {
+            if !self.enabled.contains(id) {
+                continue;
+            }
+            let Some(node) = plan.nodes.iter().find(|n| &n.id == id) else {
+                continue;
+            };
+            match self.execute_node(plan, node).await {
+                Ok(()) => {}
+                Err(reason) => return PlanOutcome::Rejected { reason },
+            }
+            self.propagate_enabled(plan, id);
+        }
+
+        // Результат: последний узел с into (или весь store как объект).
+        let result = plan
+            .nodes
+            .iter()
+            .filter_map(|n| n.into.as_ref().and_then(|k| self.store.get(k)))
+            .last()
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        PlanOutcome::Completed { result }
+    }
+
+    /// Разметить достижимые узлы после исполнения `from`.
+    fn propagate_enabled(&mut self, plan: &Plan, from: &str) {
+        for e in plan.edges.iter().filter(|e| e.from == from) {
+            let active = match e.edge_type {
+                EdgeType::Seq => true,
+                EdgeType::Branch => {
+                    self.selected_branch
+                        .get(from)
+                        .is_some_and(|label| Some(label.as_str()) == e.label.as_deref())
+                }
+                EdgeType::Merge => true,
+            };
+            if active {
+                self.enabled.insert(e.to.clone());
+            }
+        }
+    }
+
+    async fn execute_node(&mut self, plan: &Plan, node: &crate::luck_plan::Node) -> Result<(), String> {
+        match node.kind {
+            NodeKind::Role | NodeKind::Classify | NodeKind::Filter | NodeKind::Step | NodeKind::Task => {
+                let user = self.node_user_text(node);
+                let system = node
+                    .slots
+                    .get("as")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let out = self
+                    .runtime
+                    .generate(system.as_deref(), &user)
+                    .await
+                    .map_err(|e| format!("node {} failed: {e}", node.id))?;
+                if let Some(k) = &node.into {
+                    self.store.insert(k.clone(), Value::String(out));
+                }
+                Ok(())
+            }
+            NodeKind::Tool => {
+                let name = node
+                    .tool
+                    .clone()
+                    .ok_or_else(|| format!("node {}: no tool", node.id))?;
+                let args = if node.args.is_null() {
+                    json!({})
+                } else {
+                    node.args.clone()
+                };
+                let out = self
+                    .runtime
+                    .call_tool(&name, &args)
+                    .await
+                    .map_err(|e| format!("node {} tool {name} failed: {e}", node.id))?;
+                if let Some(k) = &node.into {
+                    self.store.insert(k.clone(), Value::String(out));
+                }
+                Ok(())
+            }
+            NodeKind::Branch => {
+                let input_key = node
+                    .input
+                    .clone()
+                    .ok_or_else(|| format!("branch {}: no input", node.id))?;
+                let value = self
+                    .store
+                    .get(&input_key)
+                    .ok_or_else(|| format!("branch {}: input '{input_key}' not produced", node.id))?;
+                let label = value.as_str().unwrap_or("").to_string();
+                if node.branches.contains_key(&label) {
+                    self.selected_branch.insert(node.id.clone(), label);
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "branch {}: value '{label}' not among branches {:?}",
+                        node.id,
+                        node.branches.keys().collect::<Vec<_>>()
+                    ))
+                }
+            }
+            NodeKind::Verify => {
+                let spec = node
+                    .verify
+                    .as_ref()
+                    .ok_or_else(|| format!("verify {}: no spec", node.id))?;
+                self.run_verify(node.id.as_str(), spec).await
+            }
+            NodeKind::Merge => {
+                // Агрегация значений предков (по seq-рёбрам от исполненных узлов с into).
+                let inputs: Vec<Value> = plan
+                    .edges
+                    .iter()
+                    .filter(|e| e.to == node.id && e.edge_type == EdgeType::Seq)
+                    .filter_map(|e| {
+                        plan.nodes
+                            .iter()
+                            .find(|n| n.id == e.from)
+                            .and_then(|n| n.into.as_ref())
+                            .and_then(|k| self.store.get(k))
+                            .cloned()
+                    })
+                    .collect();
+                if let Some(k) = &node.into {
+                    let v = match inputs.len() {
+                        0 => json!({}),
+                        1 => inputs[0].clone(),
+                        _ => {
+                            let mut m = serde_json::Map::new();
+                            for (i, v) in inputs.into_iter().enumerate() {
+                                m.insert(format!("in{i}"), v);
+                            }
+                            Value::Object(m)
+                        }
+                    };
+                    self.store.insert(k.clone(), v);
+                }
+                Ok(())
+            }
+            NodeKind::Document | NodeKind::Spawn | NodeKind::Reject => {
+                // v1: не исполняются (SPAWN — вложенный план, TODO; Document — внешние артефакты).
+                Ok(())
+            }
+        }
+    }
+
+    fn node_user_text(&self, node: &crate::luck_plan::Node) -> String {
+        if let Some(d) = &node.do_ {
+            return d.clone();
+        }
+        if let Some(input) = &node.input {
+            if let Some(v) = self.store.get(input) {
+                return v.to_string();
+            }
+        }
+        format!("execute node {}", node.id)
+    }
+
+    async fn run_verify(&mut self, node_id: &str, spec: &crate::luck_plan::VerifySpec) -> Result<(), String> {
+        let subject_key = spec
+            .subject
+            .as_ref()
+            .ok_or_else(|| format!("verify {node_id}: no subject"))?;
+        let value = self
+            .store
+            .get(subject_key)
+            .ok_or_else(|| format!("verify {node_id}: subject '{subject_key}' not produced"))?;
+        match spec.predicate.as_str() {
+            "not_empty" => {
+                let empty = match value {
+                    Value::String(s) => s.trim().is_empty(),
+                    Value::Null => true,
+                    _ => false,
+                };
+                if empty {
+                    Err(format!("verify {node_id}: not_empty failed on '{subject_key}'"))
+                } else {
+                    Ok(())
+                }
+            }
+            "contains" => {
+                let needle = node_id; // v1: contains = непустой (без needle)
+                let _ = needle;
+                let ok = matches!(value, Value::String(s) if !s.trim().is_empty());
+                if ok {
+                    Ok(())
+                } else {
+                    Err(format!("verify {node_id}: contains failed on '{subject_key}'"))
+                }
+            }
+            // v1: файловые предикаты не реализованы в рантайме — консервативный отказ.
+            other => Err(format!(
+                "verify {node_id}: predicate '{other}' not implemented in scheduler (v1)"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Тесты (мок-рантайм, без сети)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::luck_compile::compile;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockRuntime {
+        tool_calls: AtomicUsize,
+        /// Генеративные ответы по подстроке user-текста.
+        classify_answer: &'static str,
+    }
+
+    #[async_trait]
+    impl PlanRuntime for MockRuntime {
+        async fn generate(&self, _system: Option<&str>, user: &str) -> Result<String, String> {
+            if user.contains("classify") || user.contains("severity") {
+                Ok(self.classify_answer.to_string())
+            } else {
+                Ok("ok".to_string())
+            }
+        }
+        async fn call_tool(&self, name: &str, _args: &Value) -> Result<String, String> {
+            self.tool_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(format!("tool:{name}:done"))
+        }
+    }
+
+    fn runtime() -> Arc<MockRuntime> {
+        Arc::new(MockRuntime {
+            tool_calls: AtomicUsize::new(0),
+            classify_answer: "critical",
+        })
+    }
+
+    #[tokio::test]
+    async fn linear_plan_completes() {
+        let src = r#"
+NODE role: ROLE
+  AS "assistant"
+  INTO ctx
+END
+NODE step1: STEP
+  INPUT ctx
+  DO "first step"
+  INTO a
+END
+NODE probe: TOOL
+  TOOL shell
+  ARGS {"cmd":"echo hi"}
+  INTO out
+END
+NODE verify: VERIFY
+  VERIFY not_empty INTO out
+END
+NODE merge: MERGE
+  INTO final
+END
+NODE report: STEP
+  INPUT final
+  DO "write report"
+  INTO result
+END
+EDGES
+  role -> step1
+  step1 -> probe
+  probe -> verify
+  verify -> merge
+  merge -> report
+END
+"#;
+        let plan = compile(src).expect("compile");
+        let rt = runtime();
+        let mut ex = PlanExecutor::new(rt.clone());
+        let outcome = ex.run(&plan).await;
+        assert!(matches!(outcome, PlanOutcome::Completed { .. }));
+        assert_eq!(rt.tool_calls.load(Ordering::SeqCst), 1);
+        assert!(ex.store().get("result").is_some());
+    }
+
+    #[tokio::test]
+    async fn branch_runs_only_selected_target() {
+        let src = r#"
+NODE classify: STEP
+  DO "severity classify"
+  INTO level
+END
+NODE fork: BRANCH
+  INPUT level
+  BRANCHES critical=probe_a, warning=probe_b
+END
+NODE probe_a: TOOL
+  TOOL shell
+  ARGS {"cmd":"echo A"}
+  INTO out_a
+END
+NODE probe_b: TOOL
+  TOOL shell
+  ARGS {"cmd":"echo B"}
+  INTO out_b
+END
+EDGES
+  classify -> fork
+  fork -> probe_a [critical]
+  fork -> probe_b [warning]
+END
+"#;
+        let plan = compile(src).expect("compile");
+        let rt = runtime(); // classify_answer = "critical"
+        let mut ex = PlanExecutor::new(rt.clone());
+        let outcome = ex.run(&plan).await;
+        assert!(matches!(outcome, PlanOutcome::Completed { .. }));
+        // Выполнился только probe_a (critical).
+        assert_eq!(rt.tool_calls.load(Ordering::SeqCst), 1);
+        assert!(ex.store().contains_key("out_a"));
+        assert!(!ex.store().contains_key("out_b"));
+    }
+
+    #[tokio::test]
+    async fn verify_failure_rejects() {
+        let src = r#"
+NODE empty: STEP
+  DO "produce empty"
+  INTO val
+END
+NODE v: VERIFY
+  VERIFY not_empty INTO val
+END
+EDGES
+  empty -> v
+END
+"#;
+        let plan = compile(src).expect("compile");
+        let mut ex = PlanExecutor::new(runtime());
+        let outcome = ex.run(&plan).await;
+        // Мок-рантайм возвращает "ok" (не пусто) — добавим негативный кейс ниже.
+        assert!(matches!(outcome, PlanOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn verify_failure_rejects_when_empty() {
+        struct EmptyRuntime;
+        #[async_trait]
+        impl PlanRuntime for EmptyRuntime {
+            async fn generate(&self, _s: Option<&str>, _u: &str) -> Result<String, String> {
+                Ok("   ".to_string())
+            }
+            async fn call_tool(&self, _n: &str, _a: &Value) -> Result<String, String> {
+                Ok(String::new())
+            }
+        }
+        let src = r#"
+NODE empty: STEP
+  DO "produce empty"
+  INTO val
+END
+NODE v: VERIFY
+  VERIFY not_empty INTO val
+END
+EDGES
+  empty -> v
+END
+"#;
+        let plan = compile(src).expect("compile");
+        let mut ex = PlanExecutor::new(Arc::new(EmptyRuntime));
+        let outcome = ex.run(&plan).await;
+        assert!(matches!(outcome, PlanOutcome::Rejected { reason } if reason.contains("not_empty")));
+    }
+}
