@@ -1,0 +1,45 @@
+# ============================================================
+# demo.luck — простой план на языке Luck для ai-agent
+#
+# План = список УЗЛОВ (что делать) + список РЁБЕР (в каком порядке).
+# Каждый узел:  NODE имя: ТИП
+#                ...слоты (детали)...
+#                END
+# Порядок:       EDGES ... END
+#
+# Типы узлов: ROLE (кем быть), STEP (шаг), TOOL (инструмент),
+#             CLASSIFY (разложить по меткам), BRANCH (развилка),
+#             VERIFY (проверка), MERGE (собрать вместе)
+# ============================================================
+
+# Шаг 1: назначаем роль (системный промпт для модели).
+NODE role: ROLE
+  AS "senior code reviewer"        # кем представляется модель
+  INTO ctx                          # результат → переменная ctx
+END
+
+# Шаг 2: инструмент — поиск TODO в проекте (вызовет твой tool 'grep').
+NODE find_todos: TOOL
+  TOOL grep                          # имя зарегистрированного тула
+  ARGS {"pattern": "TODO", "path": "."}   # аргументы JSON
+  INTO todos                         # результат → переменная todos
+END
+
+# Шаг 3: проверка — результат не пустой (иначе план отклоняется).
+NODE check_todos: VERIFY
+  VERIFY not_empty INTO todos        # предикат not_empty над переменной todos
+END
+
+# Шаг 4: финальный шаг — модель пишет отчёт.
+NODE report: STEP
+  INPUT todos                        # берём из переменной todos
+  DO "Составь краткий отчёт: сколько TODO и где"   # инструкция модели
+  INTO result                        # результат → переменная result
+END
+
+# Порядок исполнения: role → find_todos → check_todos → report
+EDGES
+  role -> find_todos
+  find_todos -> check_todos
+  check_todos -> report
+END

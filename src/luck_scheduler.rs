@@ -24,6 +24,7 @@ use crate::luck_plan::{EdgeType, NodeKind, Plan};
 use crate::provider::ModelProvider;
 use crate::tool_routing::ToolRouter;
 use crate::types::{ChatChunk, Message, Role};
+use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
 // Runtime-абстракция: всё, что нужно планировщику от агента
@@ -91,6 +92,15 @@ pub enum PlanOutcome {
     Rejected { reason: String },
 }
 
+/// Событие исполнения плана (для UI/прогресса).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanEvent {
+    NodeStart { id: String },
+    NodeDone { id: String, ok: bool },
+    Rejected { reason: String },
+    Completed,
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler
 // ---------------------------------------------------------------------------
@@ -100,6 +110,7 @@ pub struct PlanExecutor<R: PlanRuntime> {
     store: HashMap<String, Value>,
     selected_branch: HashMap<String, String>,
     enabled: HashSet<String>,
+    events: Option<mpsc::Sender<PlanEvent>>,
 }
 
 impl<R: PlanRuntime> PlanExecutor<R> {
@@ -109,6 +120,20 @@ impl<R: PlanRuntime> PlanExecutor<R> {
             store: HashMap::new(),
             selected_branch: HashMap::new(),
             enabled: HashSet::new(),
+            events: None,
+        }
+    }
+
+    /// Создать исполнитель, транслирующий прогресс в канал событий.
+    pub fn with_events(runtime: Arc<R>, tx: mpsc::Sender<PlanEvent>) -> Self {
+        let mut ex = Self::new(runtime);
+        ex.events = Some(tx);
+        ex
+    }
+
+    async fn emit(&self, ev: PlanEvent) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(ev).await;
         }
     }
 
@@ -181,9 +206,16 @@ impl<R: PlanRuntime> PlanExecutor<R> {
             let Some(node) = plan.nodes.iter().find(|n| &n.id == id) else {
                 continue;
             };
+            self.emit(PlanEvent::NodeStart { id: id.clone() }).await;
             match self.execute_node(plan, node).await {
-                Ok(()) => {}
-                Err(reason) => return PlanOutcome::Rejected { reason },
+                Ok(()) => {
+                    self.emit(PlanEvent::NodeDone { id: id.clone(), ok: true }).await;
+                }
+                Err(reason) => {
+                    self.emit(PlanEvent::NodeDone { id: id.clone(), ok: false }).await;
+                    self.emit(PlanEvent::Rejected { reason: reason.clone() }).await;
+                    return PlanOutcome::Rejected { reason };
+                }
             }
             self.propagate_enabled(plan, id);
         }
@@ -196,6 +228,7 @@ impl<R: PlanRuntime> PlanExecutor<R> {
             .last()
             .cloned()
             .unwrap_or_else(|| json!({}));
+        self.emit(PlanEvent::Completed).await;
         PlanOutcome::Completed { result }
     }
 
@@ -493,6 +526,41 @@ END
         assert_eq!(rt.tool_calls.load(Ordering::SeqCst), 1);
         assert!(ex.store().contains_key("out_a"));
         assert!(!ex.store().contains_key("out_b"));
+    }
+
+    #[tokio::test]
+    async fn emits_plan_events_in_order() {
+        let src = r#"
+NODE a: STEP
+  DO "a"
+  INTO x
+END
+NODE b: VERIFY
+  VERIFY not_empty INTO x
+END
+EDGES
+  a -> b
+END
+"#;
+        let plan = compile(src).expect("compile");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut ex = PlanExecutor::with_events(runtime(), tx);
+        let outcome = ex.run(&plan).await;
+        assert!(matches!(outcome, PlanOutcome::Completed { .. }));
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        assert_eq!(
+            events,
+            vec![
+                PlanEvent::NodeStart { id: "a".into() },
+                PlanEvent::NodeDone { id: "a".into(), ok: true },
+                PlanEvent::NodeStart { id: "b".into() },
+                PlanEvent::NodeDone { id: "b".into(), ok: true },
+                PlanEvent::Completed,
+            ]
+        );
     }
 
     #[tokio::test]

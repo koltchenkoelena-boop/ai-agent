@@ -28,8 +28,11 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::agent::Agent;
 use crate::luck_compile::compile as compile_luck;
-use crate::provider::FallbackProvider;
+use crate::luck_scheduler::{PlanEvent, PlanExecutor, PlanOutcome, PlanRuntime};
+use crate::provider::{FallbackProvider, ModelProvider};
 use crate::tool_routing::frontend::FrontendEvent;
+use crate::types::{Message, Role};
+use serde_json::Value;
 
 // Палитра groknight (из grok-build, Apache-2.0).
 mod palette {
@@ -201,6 +204,57 @@ fn format_event(ev: &FrontendEvent) -> Option<UILine> {
     }
 }
 
+/// Рантайм плана поверх агента: generate → provider, call_tool → router.
+pub struct TuiRuntime {
+    agent: Arc<tokio::sync::Mutex<Agent<FallbackProvider>>>,
+    model: String,
+}
+
+#[async_trait::async_trait]
+impl PlanRuntime for TuiRuntime {
+    async fn generate(&self, system: Option<&str>, user: &str) -> Result<String, String> {
+        let mut messages = Vec::new();
+        if let Some(sys) = system {
+            messages.push(Message::new(Role::System, sys));
+        }
+        messages.push(Message::new(Role::User, user));
+        let a = self.agent.lock().await;
+        let stream = a
+            .provider
+            .stream_chat(&self.model, messages, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out = String::new();
+        let mut pin = stream;
+        while let Some(chunk) = pin.next().await {
+            if let Ok(c) = chunk {
+                if let Some(d) = c.delta_content {
+                    out.push_str(&d);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn call_tool(&self, name: &str, args: &Value) -> Result<String, String> {
+        let args_str = serde_json::to_string(args).map_err(|e| e.to_string())?;
+        let a = self.agent.lock().await;
+        let tool = a
+            .router
+            .get(name)
+            .ok_or_else(|| format!("tool not found: {name}"))?;
+        tool.execute(&args_str).await
+    }
+}
+
+/// Получить событие плана (или вечно ждать, если план не запущен).
+async fn recv_plan(rx: &mut Option<mpsc::Receiver<PlanEvent>>) -> Option<Option<PlanEvent>> {
+    match rx {
+        Some(r) => Some(r.recv().await),
+        None => std::future::pending().await,
+    }
+}
+
 struct App {
     lines: Vec<UILine>,
     input: String,
@@ -306,6 +360,7 @@ pub async fn run_tui(
     let mut history: Vec<String> = Vec::new();
     let mut hist_idx: usize = 0;
     let mut quit = false;
+    let mut plan_rx: Option<mpsc::Receiver<PlanEvent>> = None;
 
     while !quit {
         let tick = tokio::time::sleep(Duration::from_millis(33));
@@ -368,7 +423,7 @@ pub async fn run_tui(
                                         }
                                         "/plan" => {
                                             if arg.is_empty() {
-                                                app.push(UILine::plain("  /plan <file.luck> — скомпилировать план", palette::MUTED));
+                                                app.push(UILine::plain("  /plan <file.luck> — скомпилировать и исполнить план", palette::MUTED));
                                             } else {
                                                 match fs::read_to_string(arg) {
                                                     Ok(src) => match compile_luck(&src) {
@@ -377,6 +432,24 @@ pub async fn run_tui(
                                                             for n in &plan.nodes {
                                                                 app.push(UILine::plain(format!("    {}: {:?}{}", n.id, n.kind, n.into.as_ref().map(|k| format!(" → {k}")).unwrap_or_default()), palette::TEXT));
                                                             }
+                                                            // Исполнение с прогрессом по узлам.
+                                                            let (ptx, prx) = mpsc::channel::<PlanEvent>(32);
+                                                            plan_rx = Some(prx);
+                                                            let a2 = agent.clone();
+                                                            let m2 = model.clone();
+                                                            let rt = result_tx.clone();
+                                                            app.running = true;
+                                                            app.status = format!("план: исполняется…");
+                                                            tokio::spawn(async move {
+                                                                let runtime = TuiRuntime { agent: a2, model: m2 };
+                                                                let mut ex = PlanExecutor::with_events(Arc::new(runtime), ptx);
+                                                                let outcome = ex.run(&plan).await;
+                                                                let err = match outcome {
+                                                                    PlanOutcome::Completed { .. } => String::new(),
+                                                                    PlanOutcome::Rejected { reason } => format!("план отклонён: {reason}"),
+                                                                };
+                                                                let _ = rt.send((String::new(), err)).await;
+                                                            });
                                                         }
                                                         Err(e) => app.push(UILine::plain(format!("  ✗ компиляция: {e}"), palette::ERR)),
                                                     },
@@ -440,6 +513,26 @@ pub async fn run_tui(
                     if err.is_empty() { "  ✓ готово".to_string() } else { format!("  ✗ {err}") },
                     if err.is_empty() { palette::OK } else { palette::ERR },
                 ));
+            }
+            pev = recv_plan(&mut plan_rx) => {
+                match pev {
+                    Some(Some(PlanEvent::NodeStart { id })) => {
+                        app.push(UILine::plain(format!("  ▶ {id}"), palette::ACCENT));
+                    }
+                    Some(Some(PlanEvent::NodeDone { id, ok })) => {
+                        app.push(UILine::plain(
+                            format!("  {} {id}", if ok { "✓" } else { "✗" }),
+                            if ok { palette::OK } else { palette::ERR },
+                        ));
+                    }
+                    Some(Some(PlanEvent::Rejected { reason })) => {
+                        app.push(UILine::plain(format!("  ⛔ {reason}"), palette::ERR));
+                    }
+                    Some(Some(PlanEvent::Completed)) => {
+                        app.push(UILine::plain("  🏁 план завершён", palette::OK));
+                    }
+                    _ => {}
+                }
             }
             _ = &mut tick => {
                 terminal.draw(|f| app.render(f))?;
