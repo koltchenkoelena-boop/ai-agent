@@ -7,3 +7,4 @@ ai-agent.bin
 history_dump.json
 chat_logs/
 
+agent_config.json

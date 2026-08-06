@@ -141,7 +141,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.set_frontend_tx(frontend_tx.clone());
     agent.set_safety_approval_rx(safety_cmd_rx);
 
-    let model = std::env::var("AI_AGENT_MODEL").unwrap_or_else(|_| "qwen2.5:3b".into());
+    let model = std::env::var("AI_AGENT_MODEL").unwrap_or_else(|_| {
+        system_cfg
+            .provider_pool
+            .first()
+            .map(|p| p.model_name.clone())
+            .unwrap_or_else(|| "qwen2.5:3b".into())
+    });
 
     // Отправляем имя модели на фронтенд
     let _ = frontend_tx.send(FrontendEvent::ModelInfo {
