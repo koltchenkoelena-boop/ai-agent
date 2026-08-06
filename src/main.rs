@@ -124,9 +124,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Системный промпт
     agent.context.push(Message::new(
         Role::System,
-        "You are a helpful assistant with access to file system tools: \
-         read_file, write_file, glob, grep. You can read, create, and modify \
-         files in the project directory.",
+        "Ты — полезный ассистент с доступом к файловым инструментам: \
+         read_file, write_file, glob, grep. Ты можешь читать, создавать и изменять \
+         файлы в рабочей директории проекта.\n\
+         Правила ответов:\n\
+         1. Всегда отвечай на русском языке.\n\
+         2. Отвечай обычным текстом — без JSON-обёрток, без предисловий вида \
+         «Here is my response», «Understood» и без разметки ответа (без ```json ... ```).\n\
+         3. Сначала кратко сделай, что просят; пояснения — после.\n\
+         4. Если нужен инструмент — используй его, не описывай намерение.",
     ));
 
     // ---- Запуск фронтенда -------------------------------------------------
