@@ -50,6 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(0);
     }
 
+    // TUI-режим: полноэкранный интерфейс — stderr-логи туда не пишем.
+    let tui_mode = std::env::args().any(|arg| arg == "--tui");
+
     // ---- Трейсинг: два слоя --------------------------------------------------
     //   1. stderr — человекочитаемый (info+ по умолчанию)
     //   2. chat_logs/*.jsonl — структурированный JSON для всех этапов пайплайна
@@ -66,9 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let json_layer = ai_agent::chat_log::json_file_layer("chat_logs");
 
-        let subscriber = Registry::default()
-            .with(stderr_layer)
-            .with(json_layer);
+        let subscriber = if tui_mode {
+            // TUI: без stderr-слоя (raw-режим рисует stderr поверх экрана).
+            Registry::default().with(json_layer)
+        } else {
+            Registry::default().with(stderr_layer).with(json_layer)
+        };
 
         tracing::subscriber::set_global_default(subscriber)
             .expect("failed to set global default subscriber");
@@ -137,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // ---- TUI-режим (--tui): полноэкранный интерфейс в стиле grok-build ------
-    if std::env::args().any(|arg| arg == "--tui") {
+    if tui_mode {
         let agent = Arc::new(tokio::sync::Mutex::new(agent));
         ai_agent::tui::run_tui(agent, model.clone(), frontend_tx.clone()).await?;
         return Ok(());
