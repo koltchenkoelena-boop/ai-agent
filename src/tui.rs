@@ -279,6 +279,8 @@ struct App {
     branch: String,
     running: bool,
     started_at: Option<std::time::Instant>,
+    /// Хендл текущего агентского таска — для прерывания по Esc/Ctrl+C.
+    abort: Option<tokio::task::AbortHandle>,
 }
 
 impl App {
@@ -291,6 +293,7 @@ impl App {
             branch: branch.to_string(),
             running: false,
             started_at: None,
+            abort: None,
         };
         app.push(UILine::plain(
             "AI Agent TUI (стиль grok-build). /help — команды, Enter — отправить, Ctrl+C — выход.",
@@ -398,7 +401,29 @@ pub async fn run_tui(
                 match ev {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         match key.code {
-                            KeyCode::Char(c) if key.modifiers.contains(event::KeyModifiers::CONTROL) && c == 'c' => quit = true,
+                            KeyCode::Char(c) if key.modifiers.contains(event::KeyModifiers::CONTROL) && c == 'c' => {
+                                // Ctrl+C: если агент работает — прервать текущий запрос,
+                                // иначе — выйти из TUI.
+                                if app.running {
+                                    if let Some(h) = app.abort.take() { h.abort(); }
+                                    app.running = false;
+                                    app.started_at = None;
+                                    app.status = format!("{model} · ветка {}", app.branch);
+                                    app.push(UILine::plain("  ⛔ прервано (Ctrl+C)", palette::ERR));
+                                } else {
+                                    quit = true;
+                                }
+                            }
+                            KeyCode::Esc => {
+                                // Esc: прервать текущий запрос (если идёт).
+                                if app.running {
+                                    if let Some(h) = app.abort.take() { h.abort(); }
+                                    app.running = false;
+                                    app.started_at = None;
+                                    app.status = format!("{model} · ветка {}", app.branch);
+                                    app.push(UILine::plain("  ⛔ прервано (Esc)", palette::ERR));
+                                }
+                            }
                             KeyCode::Char(c) => { app.input.push(c); }
                             KeyCode::Backspace => { app.input.pop(); }
                             KeyCode::Enter => {
@@ -425,6 +450,7 @@ pub async fn run_tui(
                                             app.push(UILine::plain("  /branch <name> — переключиться на ветку", palette::TEXT));
                                             app.push(UILine::plain("  /clear — очистить экран", palette::TEXT));
                                             app.push(UILine::plain("  /quit — выход (или Ctrl+C)", palette::TEXT));
+                                            app.push(UILine::plain("  Esc / Ctrl+C во время ответа — прервать агента", palette::MUTED));
                                             app.push(UILine::plain("  ↑/↓ — история, PageUp/PageDown — скролл", palette::MUTED));
                                         }
                                         "/tools" => {
@@ -512,7 +538,7 @@ pub async fn run_tui(
                                 let a2 = agent.clone();
                                 let m2 = model.clone();
                                 let rt = result_tx.clone();
-                                tokio::spawn(async move {
+                                let jh = tokio::spawn(async move {
                                     let out = {
                                         let mut a = a2.lock().await;
                                         a.run(&m2).await
@@ -523,6 +549,7 @@ pub async fn run_tui(
                                     };
                                     let _ = rt.send((answer, err)).await;
                                 });
+                                app.abort = Some(jh.abort_handle());
                             }
                             KeyCode::PageUp => { app.scroll = app.scroll.saturating_add(10); }
                             KeyCode::PageDown => { app.scroll = app.scroll.saturating_sub(10); }
@@ -553,6 +580,7 @@ pub async fn run_tui(
             Some((line, err)) = result_rx.recv() => {
                 app.running = false;
                 app.started_at = None;
+                app.abort = None;
                 app.status = format!("{model} · ветка {}", app.branch);
                 if !line.is_empty() {
                     app.push(UILine::plain("  🤖", palette::ACCENT));

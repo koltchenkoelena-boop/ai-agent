@@ -136,6 +136,9 @@ def main():
         print(read(clean=not raw))
     elif cmd == "stop":
         stop()
+    elif cmd == "attach":
+        # Присоединиться к живой сессии (видеть диалог; Ctrl+B, D — отсоединиться).
+        subprocess.run(["tmux", "attach", "-t", SESSION], check=False)
     elif cmd == "status":
         status()
     else:
