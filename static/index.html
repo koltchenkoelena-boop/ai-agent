@@ -282,6 +282,15 @@
       disabled>
       <i data-lucide="send-horizonal" class="w-4 h-4"></i>
     </button>
+    <div class="flex flex-col gap-1 shrink-0">
+      <input id="planPath" type="text" value="examples/demo.luck"
+        class="w-44 bg-slate-800/60 border border-slate-700/60 rounded-lg px-2 py-1 text-xs text-slate-300 placeholder-slate-500 focus:outline-none"
+        placeholder="plan.luck">
+      <button id="planBtn"
+        class="shrink-0 px-2.5 py-1 rounded-lg text-xs font-semibold bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white disabled:opacity-40 disabled:cursor-not-allowed">
+        ▶ план
+      </button>
+    </div>
   </div>
 </div>
 
@@ -314,6 +323,8 @@ const mobileAgentList     = $('mobileAgentList');
 const branchTree          = $('branchTree');
 const taskInput           = $('taskInput');
 const sendTaskBtn         = $('sendTaskBtn');
+const planPath            = $('planPath');
+const planBtn             = $('planBtn');
 const reconnectOverlay    = $('reconnectOverlay');
 const reconnectAttempt    = $('reconnectAttempt');
 const reconnectInfo       = $('reconnectInfo');
@@ -478,6 +489,9 @@ function handleServerEvent(data) {
       const badge = document.getElementById('modelBadge');
       if (badge && data.model_name) badge.textContent = data.model_name;
       break;
+    case 'plan_progress':
+      addPlanProgress(data);
+      break;
     case 'ping':
       break;
     default:
@@ -498,6 +512,35 @@ function incrementCounter() {
 function addEvent(type, data) {
   removePlaceholder();
   addAgentMessage({ role: data.role || type, content: data.content });
+  incrementCounter();
+}
+
+// ========================================================================
+//  PLAN PROGRESS (Luck-план)
+// ========================================================================
+function addPlanProgress(data) {
+  removePlaceholder();
+  const st = data.status || '';
+  const map = {
+    start:  ['▶',  'text-indigo-400'],
+    ok:     ['✓',  'text-emerald-400'],
+    fail:   ['✗',  'text-rose-400'],
+    reject: ['⛔', 'text-rose-400'],
+    done:   ['🏁', 'text-emerald-400'],
+  };
+  const [icon, cls] = map[st] || ['•', 'text-slate-400'];
+  const el = document.createElement('div');
+  el.className = 'event-enter flex items-start gap-2.5 px-2.5 py-1.5 rounded-lg border border-slate-800/40 bg-slate-900/30 border-l-2 border-l-indigo-500';
+  const ts = document.createElement('span');
+  ts.className = 'shrink-0 text-[10px] text-slate-600 mt-0.5 select-none';
+  ts.textContent = time();
+  const msg = document.createElement('div');
+  msg.className = `text-xs mono ${cls} mt-0.5 break-words`;
+  msg.textContent = `${icon} ${data.node || ''}`;
+  el.appendChild(ts);
+  el.appendChild(msg);
+  eventLog.appendChild(el);
+  eventLog.scrollTop = eventLog.scrollHeight;
   incrementCounter();
 }
 
@@ -751,6 +794,20 @@ function sendTask() {
 }
 
 // ========================================================================
+//  PLAN DISPATCHER
+// ========================================================================
+function sendPlan() {
+  const path = planPath.value.trim();
+  if (!path) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addEvent('system', { content: 'Cannot start plan: not connected' });
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'start_plan', path }));
+  addEvent('system', { content: '▶ план: ' + path });
+}
+
+// ========================================================================
 //  LUCIDE ICON RENDERER
 // ========================================================================
 function renderIcons(root) {
@@ -766,6 +823,7 @@ safetyApproveBtn.addEventListener('click', () => sendSafetyResponse(true));
 safetyDenyBtn.addEventListener('click', () => sendSafetyResponse(false));
 
 sendTaskBtn.addEventListener('click', sendTask);
+planBtn.addEventListener('click', sendPlan);
 taskInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();

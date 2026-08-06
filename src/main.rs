@@ -155,15 +155,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Захват стартовых значений для приветствия (после этого agent в Arc<Mutex>).
+    let boot_tool_count = agent.router.len();
+    let boot_branch = agent.context.current_branch().name.clone();
+    let boot_msgs = agent.context.current_messages().len();
+    let agent = Arc::new(tokio::sync::Mutex::new(agent));
+
     // ---- Приветствие -------------------------------------------------------
     println!();
     println!("╔══════════════════════════════════════════════╗");
     println!("║         AI Agent — Interactive CLI           ║");
     println!("╠══════════════════════════════════════════════╣");
     println!("║  Model: {:<33} ║", model);
-    println!("║  Tools: {:<33} ║", agent.router.len());
-    println!("║  Branch: {:<31} ║", agent.context.current_branch().name);
-    println!("║  Messages: {:<29} ║", agent.context.current_messages().len());
+    println!("║  Tools: {:<33} ║", boot_tool_count);
+    println!("║  Branch: {:<31} ║", boot_branch);
+    println!("║  Messages: {:<29} ║", boot_msgs);
     println!("║  UI: http://127.0.0.1:8080                ║");
     println!("╠══════════════════════════════════════════════╣");
     println!("║  /help — список команд                      ║");
@@ -207,7 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prompt
                     }
                     Some(ClientCommand::SwitchBranch { name }) => {
-                        match agent.context.switch_by_name(&name) {
+                        let mut a = agent.lock().await;
+                        match a.context.switch_by_name(&name) {
                             Ok(()) => {
                                 tracing::info!("Switched to branch '{name}'");
                                 println!("\n  Switched to branch '{name}'\n");
@@ -217,6 +224,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("\n  {e}\n");
                             }
                         }
+                        continue;
+                    }
+                    Some(ClientCommand::StartPlan { path }) => {
+                        println!("\n[UI] Start plan: {path}");
+                        let agent2 = agent.clone();
+                        let model2 = model.clone();
+                        let ftx = frontend_tx.clone();
+                        tokio::spawn(async move {
+                            let ftx = ftx;
+                            let _ = ftx.send(FrontendEvent::PlanProgress {
+                                node: format!("plan: {path}"),
+                                status: "start".into(),
+                            });
+                            match std::fs::read_to_string(&path) {
+                                Ok(src) => match ai_agent::luck_compile::compile(&src) {
+                                    Ok(plan) => {
+                                        let (ptx, mut prx) = tokio::sync::mpsc::channel::<ai_agent::luck_scheduler::PlanEvent>(32);
+                                        // Прогресс плана → фронтенд.
+                                        tokio::spawn(async move {
+                                            while let Some(ev) = prx.recv().await {
+                                                use ai_agent::luck_scheduler::PlanEvent;
+                                                let msg = match ev {
+                                                    PlanEvent::NodeStart { id } => (id, "start".to_string()),
+                                                    PlanEvent::NodeDone { id, ok } => (id, if ok { "ok".into() } else { "fail".into() }),
+                                                    PlanEvent::Rejected { reason } => (format!("REJECT: {reason}"), "reject".into()),
+                                                    PlanEvent::Completed => ("plan completed".to_string(), "done".into()),
+                                                };
+                                                let _ = ftx.send(FrontendEvent::PlanProgress { node: msg.0, status: msg.1 });
+                                            }
+                                        });
+                                        let runtime = ai_agent::tui::TuiRuntime::new(agent2, model2);
+                                        let mut ex = ai_agent::luck_scheduler::PlanExecutor::with_events(
+                                            std::sync::Arc::new(runtime), ptx);
+                                        let _ = ex.run(&plan).await;
+                                    }
+                                    Err(e) => {
+                                        let _ = ftx.send(FrontendEvent::PlanProgress {
+                                            node: format!("compile error: {e}"),
+                                            status: "reject".into(),
+                                        });
+                                    }
+                                },
+                                Err(e) => {
+                                    let _ = ftx.send(FrontendEvent::PlanProgress {
+                                        node: format!("file error: {e}"),
+                                        status: "reject".into(),
+                                    });
+                                }
+                            }
+                        });
                         continue;
                     }
                     Some(ClientCommand::SafetyResponse { .. }) => {
@@ -263,9 +320,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!();
                 }
                 "/branch" => {
-                    let current = agent.context.current_branch().name.clone();
+                    let a = agent.lock().await;
+                    let current = a.context.current_branch().name.clone();
                     println!();
-                    for b in agent.context.list() {
+                    for b in a.context.list() {
                         let marker = if b.name == current { " *" } else { "  " };
                         println!("  {}{} ({})", marker, b.name, b.messages.len());
                     }
@@ -273,7 +331,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 "/tools" => {
                     println!();
-                    let names = agent.router.tool_names();
+                    let a = agent.lock().await;
+                    let names = a.router.tool_names();
                     if names.is_empty() {
                         println!("  No tools registered.");
                     } else {
@@ -285,10 +344,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!();
                 }
                 "/snapshot" => {
-                    let snap = agent.context.snapshot();
+                    let a = agent.lock().await;
+                    let snap = a.context.snapshot();
                     println!();
                     for (id, (name, msgs)) in &snap {
-                        let current = agent.context.current_branch().name.as_str();
+                        let current = a.context.current_branch().name.as_str();
                         let marker = if name.as_str() == current {
                             " *"
                         } else {
@@ -299,12 +359,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!();
                 }
                 "/swarm" => {
-                    let provider = agent.provider.clone();
+                    let a = agent.lock().await;
+                    let provider = a.provider.clone();
                     let mut cluster = AgentCluster::new(provider);
                     // Copy current context messages
-                    for msg in agent.context.current_messages().iter() {
+                    for msg in a.context.current_messages().iter() {
                         cluster.context.push(msg.clone());
                     }
+                    drop(a);
 
                     println!();
                     println!("  Spawning 2 parallel sub-agents...");
@@ -345,7 +407,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if name.is_empty() {
                                 println!("  Usage: /switch <branch_name>");
                             } else {
-                                match agent.context.switch_by_name(name) {
+                                let mut a = agent.lock().await;
+                                match a.context.switch_by_name(name) {
                                     Ok(()) => {
                                         tracing::info!("Switched to branch '{name}'");
                                         println!("  Switched to branch '{name}'");
@@ -361,7 +424,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if name.is_empty() {
                                 println!("  Usage: /rename <new_name>");
                             } else {
-                                agent.context.rename(name);
+                                let mut a = agent.lock().await;
+                                a.context.rename(name);
                                 tracing::info!("Branch renamed to '{name}'");
                                 println!("  Branch renamed to '{name}'");
                             }
@@ -377,10 +441,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // ── Сообщение пользователю ──────────────────────────────────────
-        agent.context.push(Message::new(Role::User, &input));
+        {
+            let mut a = agent.lock().await;
+            a.context.push(Message::new(Role::User, &input));
+        }
 
         // ── Запуск агента ───────────────────────────────────────────────
-        match agent.run(model.as_str()).await {
+        let run_result = {
+            let mut a = agent.lock().await;
+            a.run(model.as_str()).await
+        };
+        match run_result {
             Ok(response) => {
                 let _ = frontend_tx.send(FrontendEvent::AgentMessage {
                     content: response.clone(),
@@ -403,7 +474,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- Персистентный снапшот на выходе ----------------------------------
     if shutdown_requested {
-        persist_snapshot(&agent);
+        let a = agent.lock().await;
+        persist_snapshot(&a);
     }
 
     // ---- Остановка фронтенд-сервера ---------------------------------------

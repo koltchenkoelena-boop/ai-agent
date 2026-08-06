@@ -200,6 +200,16 @@ fn format_event(ev: &FrontendEvent) -> Option<UILine> {
         FrontendEvent::ModelInfo { model_name } => {
             Some(UILine::plain(format!("  модель: {model_name}"), MUTED))
         }
+        FrontendEvent::PlanProgress { node, status } => {
+            let (icon, color) = match status.as_str() {
+                "start" => ("▶", ACCENT),
+                "ok" => ("✓", OK),
+                "fail" => ("✗", ERR),
+                "reject" => ("⛔", ERR),
+                _ => ("•", MUTED),
+            };
+            Some(UILine::plain(format!("  {icon} {node}"), color))
+        }
         FrontendEvent::Ping => None,
     }
 }
@@ -208,6 +218,12 @@ fn format_event(ev: &FrontendEvent) -> Option<UILine> {
 pub struct TuiRuntime {
     agent: Arc<tokio::sync::Mutex<Agent<FallbackProvider>>>,
     model: String,
+}
+
+impl TuiRuntime {
+    pub fn new(agent: Arc<tokio::sync::Mutex<Agent<FallbackProvider>>>, model: String) -> Self {
+        Self { agent, model }
+    }
 }
 
 #[async_trait::async_trait]

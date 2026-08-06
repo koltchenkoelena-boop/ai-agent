@@ -59,6 +59,12 @@ pub enum FrontendEvent {
     ModelInfo {
         model_name: String,
     },
+    /// Прогресс исполнения Luck-плана (узел или фаза).
+    /// status: "start" | "ok" | "fail" | "reject" | "done"
+    PlanProgress {
+        node: String,
+        status: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +86,10 @@ pub enum ClientCommand {
     /// Переключиться на ветку контекста.
     SwitchBranch {
         name: String,
+    },
+    /// Запустить Luck-план из файла (путь относительно рабочей директории).
+    StartPlan {
+        path: String,
     },
 }
 
