@@ -4,11 +4,15 @@
 // Стиль/палитра — из grok-build (xai-grok-pager-render, Apache-2.0):
 //   groknight: BG #0a0a0a, BG_STORM #141414, BG_HIGHLIGHT #242424, акцент RGB(122,162,247)
 // Раскладка: скроллбек сообщений / поле ввода / статус-бар (в духе xai-grok-pager).
-// События агента приходят через broadcast FrontendEvent (общая шина с WebSocket-фронтом).
+// Докрутка:
+//   - лёгкий markdown-хайлайтер (заголовки, **bold**, *italic*, `code`, ```fences```)
+//   - slash-команды: /help /tools /branch [name] /clear /plan <file.luck> /quit
+//   - ветка контекста в статус-баре и переключение
 // Запуск: ai-agent --tui
 // ---------------------------------------------------------------------------
 
 use std::error::Error;
+use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +27,7 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::agent::Agent;
+use crate::luck_compile::compile as compile_luck;
 use crate::provider::FallbackProvider;
 use crate::tool_routing::frontend::FrontendEvent;
 
@@ -38,17 +43,111 @@ mod palette {
     pub const ERR: Color = Color::Rgb(240, 110, 110);
 }
 
-/// Одна строка скроллбека: текст + цвет.
+/// Строка скроллбека: набор Span'ов (поддерживает markdown-разметку).
 #[derive(Debug, Clone)]
 struct UILine {
-    text: String,
-    color: Color,
+    spans: Vec<Span<'static>>,
 }
 
 impl UILine {
-    fn new(text: impl Into<String>, color: Color) -> Self {
-        Self { text: text.into(), color }
+    fn plain(text: impl Into<String>, color: Color) -> Self {
+        Self { spans: vec![Span::styled(text.into(), Style::default().fg(color))] }
     }
+
+    /// Markdown-строка с подсветкой.
+    fn markdown(text: &str) -> Self {
+        Self { spans: markdown_spans(text, palette::TEXT) }
+    }
+
+    #[cfg(test)]
+    fn text(&self) -> String {
+        self.spans.iter().map(|s| s.content.as_ref().to_string()).collect()
+    }
+}
+
+/// Лёгкий markdown-хайлайтер (v1: заголовки, **bold**, *italic*, `code`, ```fences```).
+fn markdown_spans(text: &str, base: Color) -> Vec<Span<'static>> {
+    use palette::*;
+    let trimmed = text.trim_start();
+    // ```fence``` — весь блок приглушённым.
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        return vec![Span::styled(text.to_string(), Style::default().fg(MUTED))];
+    }
+    // Заголовок.
+    let header_level = trimmed.chars().take_while(|&c| c == '#').count();
+    if header_level > 0 && trimmed.len() > header_level && trimmed.as_bytes()[header_level] == b' ' {
+        let content = trimmed[header_level..].trim();
+        let style = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
+        return vec![Span::styled(format!("{} {}", "#".repeat(header_level), content), style)];
+    }
+
+    // Разбиваем по обратным кавычкам: нечётные сегменты — inline-код.
+    let mut spans = Vec::new();
+    for (i, seg) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            // inline-код.
+            spans.push(Span::styled(
+                seg.to_string(),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            // обычный текст: выделяем **bold** и *italic* (один уровень).
+            let mut plain = String::new();
+            let mut j = 0usize;
+            while j < seg.len() {
+                let ch = seg[j..].chars().next().unwrap();
+                if seg[j..].starts_with("**") {
+                    if !plain.is_empty() {
+                        spans.push(Span::styled(std::mem::take(&mut plain), Style::default().fg(base)));
+                    }
+                    let end = seg[j + 2..].find("**");
+                    match end {
+                        Some(e) => {
+                            let inner = &seg[j + 2..j + 2 + e];
+                            spans.push(Span::styled(
+                                inner.to_string(),
+                                Style::default().fg(base).add_modifier(Modifier::BOLD),
+                            ));
+                            j += 2 + e + 2;
+                        }
+                        None => {
+                            plain.push_str(&seg[j..]);
+                            j = seg.len();
+                        }
+                    }
+                } else if ch == '*' {
+                    if !plain.is_empty() {
+                        spans.push(Span::styled(std::mem::take(&mut plain), Style::default().fg(base)));
+                    }
+                    let end = seg[j + 1..].find('*');
+                    match end {
+                        Some(e) => {
+                            let inner = &seg[j + 1..j + 1 + e];
+                            spans.push(Span::styled(
+                                inner.to_string(),
+                                Style::default().fg(base).add_modifier(Modifier::ITALIC),
+                            ));
+                            j += 1 + e + 1;
+                        }
+                        None => {
+                            plain.push('*');
+                            j += 1;
+                        }
+                    }
+                } else {
+                    plain.push(ch);
+                    j += ch.len_utf8();
+                }
+            }
+            if !plain.is_empty() {
+                spans.push(Span::styled(plain, Style::default().fg(base)));
+            }
+        }
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(text.to_string(), Style::default().fg(base)));
+    }
+    spans
 }
 
 /// Форматировать событие фронтенда в строку UI.
@@ -56,8 +155,25 @@ fn format_event(ev: &FrontendEvent) -> Option<UILine> {
     use palette::*;
     match ev {
         FrontendEvent::AgentMessage { content } => {
-            let wrapped = textwrap::wrap(content, 110);
-            Some(UILine::new(format!("  {}", wrapped.join("\n  ")), TEXT))
+            // Сообщение агента — с markdown-подсветкой, по строкам.
+            let mut lines = Vec::new();
+            for l in content.lines() {
+                lines.push(UILine::markdown(l));
+            }
+            // Складываем в одну строку через перенос (ListItem поддерживает multi-line Line? нет —
+            // поэтому каждая строка становится отдельной UILine, но нам нужен один элемент).
+            // Упрощение: рендерим как одну UILine с переносами внутри одного Span-набора.
+            if lines.len() == 1 {
+                return lines.into_iter().next();
+            }
+            let mut spans = Vec::new();
+            for (i, l) in lines.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("\n"));
+                }
+                spans.extend(l.spans.iter().cloned());
+            }
+            Some(UILine { spans })
         }
         FrontendEvent::ToolExecuting { tool_name, arguments } => {
             let args = arguments.replace('\n', " ");
@@ -66,20 +182,20 @@ fn format_event(ev: &FrontendEvent) -> Option<UILine> {
             } else {
                 args
             };
-            Some(UILine::new(format!("  🔧 {tool_name} {args}"), MUTED))
+            Some(UILine::plain(format!("  🔧 {tool_name} {args}"), MUTED))
         }
         FrontendEvent::ToolResult { tool_name, result } => {
             let r = result.replace('\n', " ").chars().take(80).collect::<String>();
-            Some(UILine::new(format!("  ✅ {tool_name}: {r}"), OK))
+            Some(UILine::plain(format!("  ✅ {tool_name}: {r}"), OK))
         }
         FrontendEvent::SafetyReviewRequired { tool_name, reason } => {
-            Some(UILine::new(format!("  ⚠️  SAFETY: {tool_name} — {reason}"), WARN))
+            Some(UILine::plain(format!("  ⚠️  SAFETY: {tool_name} — {reason}"), WARN))
         }
         FrontendEvent::ContextBranched { branch_name, source_branch } => {
-            Some(UILine::new(format!("  🌿 ветка {source_branch} → {branch_name}"), ACCENT))
+            Some(UILine::plain(format!("  🌿 ветка {source_branch} → {branch_name}"), ACCENT))
         }
         FrontendEvent::ModelInfo { model_name } => {
-            Some(UILine::new(format!("  модель: {model_name}"), MUTED))
+            Some(UILine::plain(format!("  модель: {model_name}"), MUTED))
         }
         FrontendEvent::Ping => None,
     }
@@ -90,8 +206,8 @@ struct App {
     input: String,
     scroll: u16,
     status: String,
+    branch: String,
     running: bool,
-    last_lines: usize,
 }
 
 impl App {
@@ -101,11 +217,11 @@ impl App {
             input: String::new(),
             scroll: 0,
             status: format!("{model} · ветка {branch} · тулы {tool_count}"),
+            branch: branch.to_string(),
             running: false,
-            last_lines: 0,
         };
-        app.lines.push(UILine::new(
-            "AI Agent TUI (стиль grok-build). Enter — отправить, /help — команды, Ctrl+C — выход.",
+        app.push(UILine::plain(
+            "AI Agent TUI (стиль grok-build). /help — команды, Enter — отправить, Ctrl+C — выход.",
             palette::MUTED,
         ));
         app
@@ -116,7 +232,7 @@ impl App {
     }
 
     fn push_user(&mut self, text: &str) {
-        self.lines.push(UILine::new(format!("❯ {text}"), palette::ACCENT));
+        self.lines.push(UILine::plain(format!("❯ {text}"), palette::ACCENT));
     }
 
     fn render(&mut self, f: &mut Frame) {
@@ -129,12 +245,12 @@ impl App {
             ])
             .split(f.area());
 
-        // Скроллбек: показываем последние N строк, скролл — вверх от конца.
         let max_lines = (chunks[0].height as usize).saturating_sub(2);
         let start = self.lines.len().saturating_sub(max_lines).saturating_sub(self.scroll as usize);
-        let items: Vec<ListItem> = self.lines[start..].iter().map(|l| {
-            ListItem::new(Line::from(vec![Span::styled(l.text.clone(), Style::default().fg(l.color))]))
-        }).collect();
+        let items: Vec<ListItem> = self.lines[start..]
+            .iter()
+            .map(|l| ListItem::new(Line::from(l.spans.clone())))
+            .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" ai-agent ")
@@ -142,7 +258,6 @@ impl App {
             .highlight_style(Style::default().add_modifier(Modifier::BOLD));
         f.render_widget(list, chunks[0]);
 
-        // Поле ввода.
         let input_widget = Paragraph::new(self.input.as_str())
             .style(Style::default().fg(palette::TEXT))
             .block(Block::default().borders(Borders::ALL).title(" ввод ")
@@ -153,7 +268,6 @@ impl App {
             chunks[1].y + 1,
         ));
 
-        // Статус-бар.
         let status = Paragraph::new(Line::from(vec![
             Span::styled("◆", Style::default().fg(if self.running { palette::OK } else { palette::ACCENT })),
             Span::styled(format!("  {}", self.status), Style::default().fg(palette::MUTED)),
@@ -161,50 +275,48 @@ impl App {
         .alignment(Alignment::Left)
         .style(Style::default().bg(palette::BG_STORM));
         f.render_widget(status, chunks[2]);
-
-        self.last_lines = self.lines.len();
     }
 }
 
 /// Запустить TUI-цикл (взамен stdin-цикла в main.rs).
-/// `agent` — в Arc<Mutex<>>, чтобы агент-таск мог работать параллельно с отрисовкой.
 pub async fn run_tui(
     agent: Arc<tokio::sync::Mutex<Agent<FallbackProvider>>>,
     model: String,
     frontend_tx: broadcast::Sender<FrontendEvent>,
 ) -> Result<(), Box<dyn Error>> {
-    // Terminal setup.
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Текущее состояние для статус-бара.
-    let (branch_name, tool_count) = {
+    let (branch_name, tool_count, tools) = {
         let a = agent.lock().await;
-        (a.context.current_branch().name.clone(), a.router.len())
+        (
+            a.context.current_branch().name.clone(),
+            a.router.len(),
+            a.router.tool_names().into_iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
     };
 
     let mut app = App::new(&model, &branch_name, tool_count);
     let mut events = event::EventStream::new();
-    let (result_tx, mut result_rx) = mpsc::channel::<(String, String)>(16); // (line, error)
+    let (result_tx, mut result_rx) = mpsc::channel::<(String, String)>(16);
     let mut frontend_rx = frontend_tx.subscribe();
     let mut history: Vec<String> = Vec::new();
     let mut hist_idx: usize = 0;
+    let mut quit = false;
 
-    let res = loop {
-        // Тик для отрисовки (30 fps) + события.
+    while !quit {
         let tick = tokio::time::sleep(Duration::from_millis(33));
         tokio::pin!(tick);
 
         tokio::select! {
-            // Клавиатура.
             ev = events.next() => {
                 match ev {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         match key.code {
-                            KeyCode::Char(c) if key.modifiers.contains(event::KeyModifiers::CONTROL) && c == 'c' => break,
+                            KeyCode::Char(c) if key.modifiers.contains(event::KeyModifiers::CONTROL) && c == 'c' => quit = true,
                             KeyCode::Char(c) => { app.input.push(c); }
                             KeyCode::Backspace => { app.input.pop(); }
                             KeyCode::Enter => {
@@ -214,6 +326,73 @@ pub async fn run_tui(
                                 hist_idx = history.len();
                                 app.push_user(&text);
                                 app.input.clear();
+
+                                if text.starts_with('/') {
+                                    // ---- slash-команды -------------------------------
+                                    let mut cmd_parts = text.splitn(2, char::is_whitespace);
+                                    let cmd = cmd_parts.next().unwrap_or("");
+                                    let arg = cmd_parts.next().unwrap_or("").trim();
+                                    match cmd {
+                                        "/help" => {
+                                            app.push(UILine::plain(
+                                                "  /help /tools /branch [name] /clear /plan <file.luck> /quit",
+                                                palette::MUTED));
+                                        }
+                                        "/tools" => {
+                                            for t in &tools { app.push(UILine::plain(format!("  • {t}"), palette::TEXT)); }
+                                            if tools.is_empty() { app.push(UILine::plain("  (тулов нет)", palette::MUTED)); }
+                                        }
+                                        "/branch" => {
+                                            let mut a = agent.lock().await;
+                                            let list = a.context.list();
+                                            for b in list {
+                                                let cur = if b.name == app.branch { " ◀" } else { "" };
+                                                app.push(UILine::plain(format!("  • {} ({} сообщ.){cur}", b.name, a.context.current_messages().len()), palette::TEXT));
+                                            }
+                                            if arg.is_empty() {
+                                                app.push(UILine::plain("  /branch <name> — переключиться", palette::MUTED));
+                                            } else {
+                                                match a.context.switch_by_name(arg) {
+                                                    Ok(()) => {
+                                                        app.branch = a.context.current_branch().name.clone();
+                                                        app.status = format!("{model} · ветка {}", app.branch);
+                                                        app.push(UILine::plain(format!("  🌿 переключено на «{arg}»"), palette::OK));
+                                                    }
+                                                    Err(e) => app.push(UILine::plain(format!("  ✗ {e}"), palette::ERR)),
+                                                }
+                                            }
+                                        }
+                                        "/clear" => {
+                                            app.lines.clear();
+                                            app.scroll = 0;
+                                        }
+                                        "/plan" => {
+                                            if arg.is_empty() {
+                                                app.push(UILine::plain("  /plan <file.luck> — скомпилировать план", palette::MUTED));
+                                            } else {
+                                                match fs::read_to_string(arg) {
+                                                    Ok(src) => match compile_luck(&src) {
+                                                        Ok(plan) => {
+                                                            app.push(UILine::plain(format!("  ✅ план: {} узлов, {} рёбер", plan.nodes.len(), plan.edges.len()), palette::OK));
+                                                            for n in &plan.nodes {
+                                                                app.push(UILine::plain(format!("    {}: {:?}{}", n.id, n.kind, n.into.as_ref().map(|k| format!(" → {k}")).unwrap_or_default()), palette::TEXT));
+                                                            }
+                                                        }
+                                                        Err(e) => app.push(UILine::plain(format!("  ✗ компиляция: {e}"), palette::ERR)),
+                                                    },
+                                                    Err(e) => app.push(UILine::plain(format!("  ✗ файл: {e}"), palette::ERR)),
+                                                }
+                                            }
+                                        }
+                                        "/quit" => quit = true,
+                                        other => {
+                                            app.push(UILine::plain(format!("  ✗ неизвестная команда: {other}"), palette::ERR));
+                                        }
+                                    }
+                                    continue;
+                                }
+
+                                // ---- обычный запрос к агенту -----------------------
                                 app.running = true;
                                 app.status = format!("{model} · работает…");
                                 let a2 = agent.clone();
@@ -243,11 +422,10 @@ pub async fn run_tui(
                     }
                     Some(Ok(Event::Key(_))) => {}
                     Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
-                    None => break,
+                    Some(Err(_)) => quit = true,
+                    None => quit = true,
                 }
             }
-            // События агента (общая шина с WebSocket).
             ev = frontend_rx.recv() => {
                 if let Ok(ev) = ev {
                     if let Some(line) = format_event(&ev) {
@@ -255,23 +433,22 @@ pub async fn run_tui(
                     }
                 }
             }
-            // Результат генерации (спаун-таск).
             Some((_line, err)) = result_rx.recv() => {
                 app.running = false;
-                app.status = format!("{model} · ветка {branch_name}");
-                app.push(UILine::new(if err.is_empty() { "  ✓ готово".into() } else { format!("  ✗ {err}") },
-                    if err.is_empty() { palette::OK } else { palette::ERR }));
+                app.status = format!("{model} · ветка {}", app.branch);
+                app.push(UILine::plain(
+                    if err.is_empty() { "  ✓ готово".to_string() } else { format!("  ✗ {err}") },
+                    if err.is_empty() { palette::OK } else { palette::ERR },
+                ));
             }
             _ = &mut tick => {
                 terminal.draw(|f| app.render(f))?;
             }
         }
-    };
+    }
 
-    // Cleanup.
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
-    let _ = res;
     Ok(())
 }
 
@@ -281,9 +458,9 @@ mod tests {
 
     #[test]
     fn formats_agent_message() {
-        let ev = FrontendEvent::AgentMessage { content: "привет".into() };
+        let ev = FrontendEvent::AgentMessage { content: "привет **мир**".into() };
         let l = format_event(&ev).expect("message formats");
-        assert!(l.text.contains("привет"));
+        assert!(l.text().contains("привет мир"));
     }
 
     #[test]
@@ -293,12 +470,39 @@ mod tests {
             arguments: "echo hi\nwith newline".into(),
         };
         let l = format_event(&ev).expect("tool formats");
-        assert!(l.text.contains("shell"));
-        assert!(!l.text.contains('\n')); // аргументы схлопнуты в одну строку
+        assert!(l.text().contains("shell"));
+        assert!(!l.text().contains('\n'));
     }
 
     #[test]
     fn ping_skipped() {
         assert!(format_event(&FrontendEvent::Ping).is_none());
+    }
+
+    #[test]
+    fn markdown_bold() {
+        let spans = markdown_spans("a **bold** b", palette::TEXT);
+        let has_bold = spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD));
+        assert!(has_bold);
+    }
+
+    #[test]
+    fn markdown_code() {
+        let spans = markdown_spans("use `grep -r` now", palette::TEXT);
+        assert!(spans.iter().any(|s| s.style.fg == Some(palette::ACCENT)));
+    }
+
+    #[test]
+    fn markdown_header() {
+        let spans = markdown_spans("## Заголовок", palette::TEXT);
+        assert!(spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+        let joined: String = spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(joined.contains("Заголовок"));
+    }
+
+    #[test]
+    fn markdown_fence_muted() {
+        let spans = markdown_spans("```code block```", palette::TEXT);
+        assert!(spans.iter().any(|s| s.style.fg == Some(palette::MUTED)));
     }
 }
