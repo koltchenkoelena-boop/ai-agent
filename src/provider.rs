@@ -470,9 +470,29 @@ impl ModelProvider for FallbackProvider {
 
             let mut payload = serde_json::json!({
                 "model": cfg.model_name,
-                "messages": messages,
                 "stream": true,
             });
+            // content: None не отправляем — некоторые бэкенды (Ollama) отвечают
+            // 400 "invalid message content type: nil" на отсутствующий content.
+            let msgs: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|m| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("role".into(), serde_json::json!(m.role));
+                    obj.insert(
+                        "content".into(),
+                        serde_json::json!(m.content.clone().unwrap_or_default()),
+                    );
+                    if let Some(ref tc) = m.tool_calls {
+                        obj.insert("tool_calls".into(), serde_json::to_value(tc).unwrap_or(serde_json::json!([])));
+                    }
+                    if let Some(ref id) = m.tool_call_id {
+                        obj.insert("tool_call_id".into(), serde_json::json!(id));
+                    }
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+            payload["messages"] = serde_json::json!(msgs);
             if let Some(ref ot) = openai_tools {
                 payload["tools"] = serde_json::json!(ot);
             }
@@ -481,6 +501,10 @@ impl ModelProvider for FallbackProvider {
             let mut http_req = self.client.post(&url).json(&payload);
             if let Some(ref key) = cfg.api_key {
                 http_req = http_req.header("Authorization", format!("Bearer {key}"));
+            }
+            // Add Accept header for Ollama Cloud (OllamaChat) to get NDJSON stream
+            if matches!(cfg.kind, ProviderKind::OllamaChat) {
+                http_req = http_req.header("Accept", "application/x-ndjson");
             }
 
             let response = match http_req.send().await {

@@ -52,6 +52,14 @@ impl Default for SystemConfig {
 
 /// Путь к файлу конфигурации по умолчанию.
 fn config_path() -> PathBuf {
+    // Сначала рабочая директория (cargo run / запуск из проекта),
+    // затем — рядом с бинарником.
+    if let Ok(cwd) = std::env::current_dir() {
+        let p = cwd.join("agent_config.json");
+        if p.exists() {
+            return p;
+        }
+    }
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
