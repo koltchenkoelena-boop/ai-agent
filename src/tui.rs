@@ -500,6 +500,12 @@ pub async fn run_tui(
                                 }
 
                                 // ---- обычный запрос к агенту -----------------------
+                                // User-сообщение обязательно в контекст агента
+                                // (иначе модель не видит запрос и тулы не даются).
+                                {
+                                    let mut a = agent.lock().await;
+                                    a.context.push(Message::new(Role::User, &text));
+                                }
                                 app.running = true;
                                 app.started_at = Some(std::time::Instant::now());
                                 app.status = format!("{model} · работает…");
