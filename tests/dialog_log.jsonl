@@ -1,0 +1,2 @@
+{"ts": "2026-08-07T06:53:35", "kind": "question", "text": "привет"}
+{"ts": "2026-08-07T06:53:38", "kind": "answer", "text": "ai-agent\nAI Agent TUI (стиль grok-build). /help — команды, Enter — отправить, Ctrl+C — выход.\n❯ привет\n🤖\nПривет! Чем могу помочь?\nввод\n◆  deepseek-chat · ветка main"}

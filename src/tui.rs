@@ -281,6 +281,8 @@ struct App {
     started_at: Option<std::time::Instant>,
     /// Хендл текущего агентского таска — для прерывания по Esc/Ctrl+C.
     abort: Option<tokio::task::AbortHandle>,
+    /// Время последнего Ctrl+C — для двойного нажатия (выход).
+    last_ctrl_c: Option<std::time::Instant>,
 }
 
 impl App {
@@ -294,6 +296,7 @@ impl App {
             running: false,
             started_at: None,
             abort: None,
+            last_ctrl_c: None,
         };
         app.push(UILine::plain(
             "AI Agent TUI (стиль grok-build). /help — команды, Enter — отправить, Ctrl+C — выход.",
@@ -402,17 +405,40 @@ pub async fn run_tui(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         match key.code {
                             KeyCode::Char(c) if key.modifiers.contains(event::KeyModifiers::CONTROL) && c == 'c' => {
-                                // Ctrl+C: если агент работает — прервать текущий запрос,
-                                // иначе — выйти из TUI.
+                                // Ctrl+C: первый — прервать текущий запрос (или подсказка),
+                                // второй в течение 1.5с — полный выход из агента.
+                                let now = std::time::Instant::now();
+                                let double = app.last_ctrl_c.map_or(false, |prev| {
+                                    now.duration_since(prev) < std::time::Duration::from_millis(1500)
+                                });
                                 if app.running {
                                     if let Some(h) = app.abort.take() { h.abort(); }
                                     app.running = false;
                                     app.started_at = None;
                                     app.status = format!("{model} · ветка {}", app.branch);
                                     app.push(UILine::plain("  ⛔ прервано (Ctrl+C)", palette::ERR));
-                                } else {
-                                    quit = true;
                                 }
+                                if double {
+                                    app.push(UILine::plain("  выход (двойной Ctrl+C)", palette::ERR));
+                                    quit = true;
+                                } else {
+                                    app.last_ctrl_c = Some(now);
+                                    if !app.running {
+                                        app.push(UILine::plain("  Ctrl+C ещё раз — выход", palette::MUTED));
+                                    }
+                                }
+                            }
+                            KeyCode::Char(c) if key.modifiers.contains(event::KeyModifiers::CONTROL) && c == '`' => {
+                                // Ctrl+`: автономный режим — Hermes продолжает диалог сам.
+                                if app.running {
+                                    if let Some(h) = app.abort.take() { h.abort(); }
+                                    app.running = false;
+                                    app.started_at = None;
+                                    app.status = format!("{model} · ветка {}", app.branch);
+                                }
+                                app.push(UILine::plain("  🤖 автономный режим — Hermes продолжает сам", palette::ACCENT));
+                                tracing::info!(stage = "autonomy", "autonomous mode requested by user (Ctrl+`)");
+                                app.last_ctrl_c = None;
                             }
                             KeyCode::Esc => {
                                 // Esc: прервать текущий запрос (если идёт).
@@ -449,8 +475,10 @@ pub async fn run_tui(
                                             app.push(UILine::plain("  /branch — список веток контекста", palette::TEXT));
                                             app.push(UILine::plain("  /branch <name> — переключиться на ветку", palette::TEXT));
                                             app.push(UILine::plain("  /clear — очистить экран", palette::TEXT));
-                                            app.push(UILine::plain("  /quit — выход (или Ctrl+C)", palette::TEXT));
-                                            app.push(UILine::plain("  Esc / Ctrl+C во время ответа — прервать агента", palette::MUTED));
+                                            app.push(UILine::plain("  /quit — выход (или Ctrl+C дважды)", palette::TEXT));
+                                            app.push(UILine::plain("  Esc / Ctrl+C — прервать ответ агента (наблюдение продолжается)", palette::MUTED));
+                                            app.push(UILine::plain("  Ctrl+C дважды — полный выход", palette::MUTED));
+                                            app.push(UILine::plain("  Ctrl+` — автономный режим: Hermes продолжает сам", palette::MUTED));
                                             app.push(UILine::plain("  ↑/↓ — история, PageUp/PageDown — скролл", palette::MUTED));
                                         }
                                         "/tools" => {

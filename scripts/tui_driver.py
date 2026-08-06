@@ -20,10 +20,27 @@ import sys
 import time
 import re
 import shlex
+import json
+import datetime
 
 SESSION = "ai-tui-test"
 WORKDIR = "/home/avk/ws1/ai-agent"
 RUN_CMD = "cargo run -- --tui"
+LOG_PATH = WORKDIR + "/tests/dialog_log.jsonl"
+
+
+def log_record(kind, text):
+    """Протоколировать событие диалога (вопрос/ответ/прерывание/автономия)."""
+    import os
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    rec = {
+        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+        "kind": kind,
+        "text": text,
+    }
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec["ts"]
 
 
 def tmux(*args, timeout=30):
@@ -89,6 +106,7 @@ def dialog(pane):
 
 def ask(text, timeout=180):
     send(text, wait=0.3)
+    log_record("question", text)
     t0 = time.time()
     last = ""
     while time.time() - t0 < timeout:
@@ -98,7 +116,9 @@ def ask(text, timeout=180):
             # Экран стабилен и агент не думает — ответ готов.
             break
         last = pane
-    return "\n".join(dialog(read()))
+    out = "\n".join(dialog(read()))
+    log_record("answer", out)
+    return out
 
 
 def stop():
@@ -141,6 +161,12 @@ def main():
         subprocess.run(["tmux", "attach", "-t", SESSION], check=False)
     elif cmd == "status":
         status()
+    elif cmd == "log":
+        # log "<kind>" "<текст>" — записать событие в tests/dialog_log.jsonl
+        kind = args[1] if len(args) > 1 else "note"
+        text = " ".join(args[2:])
+        ts = log_record(kind, text)
+        print(ts, kind, text[:80])
     else:
         print(f"неизвестная команда: {cmd}")
         print(__doc__)
