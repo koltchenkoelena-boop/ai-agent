@@ -483,8 +483,11 @@ pub async fn run_tui(
                                         let mut a = a2.lock().await;
                                         a.run(&m2).await
                                     };
-                                    let err = out.err().map(|e| e.to_string()).unwrap_or_default();
-                                    let _ = rt.send((String::new(), err)).await;
+                                    let (answer, err) = match out {
+                                        Ok(a) => (a, String::new()),
+                                        Err(e) => (String::new(), e.to_string()),
+                                    };
+                                    let _ = rt.send((answer, err)).await;
                                 });
                             }
                             KeyCode::PageUp => { app.scroll = app.scroll.saturating_add(10); }
@@ -513,13 +516,18 @@ pub async fn run_tui(
                     }
                 }
             }
-            Some((_line, err)) = result_rx.recv() => {
+            Some((line, err)) = result_rx.recv() => {
                 app.running = false;
                 app.status = format!("{model} · ветка {}", app.branch);
-                app.push(UILine::plain(
-                    if err.is_empty() { "  ✓ готово".to_string() } else { format!("  ✗ {err}") },
-                    if err.is_empty() { palette::OK } else { palette::ERR },
-                ));
+                if !line.is_empty() {
+                    app.push(UILine::plain("  🤖", palette::ACCENT));
+                    app.push(UILine::markdown(&line));
+                }
+                if !err.is_empty() {
+                    app.push(UILine::plain(format!("  ✗ {err}"), palette::ERR));
+                } else if line.is_empty() {
+                    app.push(UILine::plain("  ✓ готово", palette::OK));
+                }
             }
             pev = recv_plan(&mut plan_rx) => {
                 match pev {
