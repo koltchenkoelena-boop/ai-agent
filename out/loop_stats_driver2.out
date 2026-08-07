@@ -1,0 +1,12 @@
+loop_stats: N=10, summary=out/loop_stats_20260807_102755.jsonl, log=out/loop_stats_20260807_102755.log
+[loop 1/10] exit=0 dur=46s report=out/self_improve_20260807_102755.json
+[loop 2/10] exit=0 dur=52s report=out/self_improve_20260807_102841.json
+[loop 3/10] exit=0 dur=43s report=out/self_improve_20260807_102933.json
+[loop 4/10] exit=0 dur=45s report=out/self_improve_20260807_103016.json
+[loop 5/10] exit=0 dur=44s report=out/self_improve_20260807_103101.json
+[loop 6/10] exit=0 dur=139s report=out/self_improve_20260807_103145.json
+[loop 7/10] exit=0 dur=44s report=out/self_improve_20260807_103404.json
+[loop 8/10] exit=0 dur=44s report=out/self_improve_20260807_103448.json
+[loop 9/10] exit=1 dur=40s report=out/self_improve_20260807_103532.json
+[loop 10/10] exit=0 dur=40s report=out/self_improve_20260807_103612.json
+loop_stats: done -> out/loop_stats_20260807_102755.jsonl

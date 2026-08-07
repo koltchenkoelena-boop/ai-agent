@@ -1,0 +1,44 @@
+{
+  "ts": "20260807_095708",
+  "total": 5,
+  "ok": 5,
+  "fail": 0,
+  "restart_every": 6,
+  "results": [
+    {
+      "q": "привет",
+      "ok": true,
+      "dur_s": 3.3,
+      "issues": [],
+      "answer": "Привет! Чем могу помочь? ввод ◆ deepseek-chat · ветка main"
+    },
+    {
+      "q": "найди все TODO в src через grep и скажи где",
+      "ok": true,
+      "dur_s": 4.3,
+      "issues": [],
+      "answer": "Нашёл три TODO в src:1. **src/luck_scheduler.rs:359** — комментарий про то, что SPAWN (вложенный план) и Document (внешние артефакты) не исполняются — помечено как TODO.2. **src/safety/mod.rs:180 — TO"
+    },
+    {
+      "q": "прочитай файл src/main.rs и скажи, что он делает",
+      "ok": true,
+      "dur_s": 7.3,
+      "issues": [],
+      "answer": "src/main.rs — точка входа AI-агента, которая запускает интерактивный CLI и (опционально) WebSocket-фронтенд. Что делает по порядку:1. Обработка флагов: --config/-c запускает интерактивное конфигурацио"
+    },
+    {
+      "q": "сколько модулей в src и какие",
+      "ok": true,
+      "dur_s": 8.3,
+      "issues": [],
+      "answer": "Дерево модулей в src: **Корневые модули (declared в src/lib.rs)** — 16:1. types2. provider3. context4. tool_routing5. safety6. agent7. hooks8. memory 9. orchestrator10. config11. chat_log12. luck_plan"
+    },
+    {
+      "q": "что бы ты улучшил в этом проекте в первую очередь",
+      "ok": true,
+      "dur_s": 17.4,
+      "issues": [],
+      "answer": "Хм, grep не находит даже let _ =, хотя оно точно есть в main.rs. Похоже, мой grep по определённому файлу не работает корректно. Не буду тратить время — у меня уже достаточно контекста из прочитанного "
+    }
+  ]
+}

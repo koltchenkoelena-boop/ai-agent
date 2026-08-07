@@ -1,0 +1,44 @@
+{
+  "ts": "20260807_092500",
+  "total": 5,
+  "ok": 5,
+  "fail": 0,
+  "restart_every": 6,
+  "results": [
+    {
+      "q": "привет",
+      "ok": true,
+      "dur_s": 3.3,
+      "issues": [],
+      "answer": "Привет! Чем могу помочь? ввод ◆ deepseek-chat · ветка main"
+    },
+    {
+      "q": "найди все TODO в src через grep и скажи где",
+      "ok": true,
+      "dur_s": 4.3,
+      "issues": [],
+      "answer": "Нашёл TODO в src:- **scheduler.rs:359 — комментарий про SPAWN (вложенный план) и Document (внешние артефакты): \"v1: не исполняются\".- safety/mod.rs:180 — TODO: проверять, не пытается ли агент отправит"
+    },
+    {
+      "q": "прочитай файл src/main.rs и скажи, что он делает",
+      "ok": true,
+      "dur_s": 8.3,
+      "issues": [],
+      "answer": "Файл src/main.rs — это точка входа (бинарник) агента AI. Внутри ai_agent crate. Что он делает: Запуск / инициализация:1. **--config / -c — запускает интерактивное меню настройки конфигурации (без запу"
+    },
+    {
+      "q": "сколько модулей в src и какие",
+      "ok": true,
+      "dur_s": 7.3,
+      "issues": [],
+      "answer": "В src модули (по lib.rs + вложенные): **Top-level модули (в lib.rs):**- types- provider- context- tool_routing (подмодули: frontend, mcp_transport, platform)- safety- agent- hooks- memory (подмодуль: "
+    },
+    {
+      "q": "что бы ты улучшил в этом проекте в первую очередь",
+      "ok": true,
+      "dur_s": 14.4,
+      "issues": [],
+      "answer": "Проект хорошо структурирован, но есть явные слабые места. Вот что бы я улучшил в первую очередь, по приоритету: 1. Реализация заглушек safety-pipeline (самое важное из TODO).- EgressStage и AdversaryS"
+    }
+  ]
+}

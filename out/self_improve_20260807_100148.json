@@ -1,0 +1,46 @@
+{
+  "ts": "20260807_100148",
+  "total": 5,
+  "ok": 4,
+  "fail": 1,
+  "restart_every": 6,
+  "results": [
+    {
+      "q": "привет",
+      "ok": true,
+      "dur_s": 3.3,
+      "issues": [],
+      "answer": "Привет! Чем могу помочь? ввод ◆ deepseek-chat · ветка main"
+    },
+    {
+      "q": "найди все TODO в src через grep и скажи где",
+      "ok": false,
+      "dur_s": 2.3,
+      "issues": [
+        "ошибка провайдера"
+      ],
+      "answer": "Привет! Чем могу помочь? ❯ найди все TODO в src через grep и скажи где ✗ Provider error: Network error: error sending request for url (https://api.deepseek.com/v1/chat/completions) ввод ◆ deepseek-cha"
+    },
+    {
+      "q": "прочитай файл src/main.rs и скажи, что он делает",
+      "ok": true,
+      "dur_s": 8.3,
+      "issues": [],
+      "answer": "TODO в src/: grep по паттерну TODO|FIXME в каталоге src не нашёл ни одного вхождения — в исходниках под src/ нет ни TODO, ни FIXME.(Примечаниint: если бы вы хотели искать по всему проекту, включая кор"
+    },
+    {
+      "q": "сколько модулей в src и какие",
+      "ok": true,
+      "dur_s": 7.3,
+      "issues": [],
+      "answer": "В src/ — 21 файл .rs. Из них модули (определённые через mod) и/или файлы с подкаталогами: **Модульные подкаталоги (с mod.rs):**- config (config/mod.rs)- memory (memory/mod.rs, memory/vector_db.rs)- sa"
+    },
+    {
+      "q": "что бы ты улучшил в этом проекте в первую очередь",
+      "ok": true,
+      "dur_s": 16.4,
+      "issues": [],
+      "answer": "Я посмотрел core-модули (main, agent, context, safety, config, memory, lib). Имея это в виду, вот что я бы улучшил в первую очередь, по приоритету.### 1. Безопасность — самый важный, и самое простоеДв"
+    }
+  ]
+}

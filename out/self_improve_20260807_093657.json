@@ -1,0 +1,46 @@
+{
+  "ts": "20260807_093657",
+  "total": 5,
+  "ok": 5,
+  "fail": 0,
+  "restart_every": 6,
+  "results": [
+    {
+      "q": "привет",
+      "ok": true,
+      "dur_s": 3.3,
+      "issues": [],
+      "answer": "Привет! Чем могу помочь? ввод ◆ deepseek-chat · ветка main"
+    },
+    {
+      "q": "найди все TODO в src через grep и скажи где",
+      "ok": true,
+      "dur_s": 4.3,
+      "issues": [],
+      "answer": "Нашёл TODO в src:1. **src/safety/mod.rs:180 — «TODO: Проверять, не пытается ли агент отправить sensitive данные».2. src/safety/mod.rs:199 — «TODO: Передать ToolCall + контекст отдельной LLM (например,"
+    },
+    {
+      "q": "прочитай файл src/main.rs и скажи, что он делает",
+      "ok": true,
+      "dur_s": 10.3,
+      "issues": [],
+      "answer": "Прочитал. Это src/main.rs — точка входа AI-агента с интерактивным CLI и WebSocket-фронтендом. Разберу по частям: Общая цельЗапускает AI-агента на Rust (tokio) с LLM-провайдером, поддерживает два режим"
+    },
+    {
+      "q": "сколько модулей в src и какие",
+      "ok": true,
+      "dur_s": 9.3,
+      "issues": [],
+      "answer": "В src/ лежат 13 файлов с расширением .rs. Вот они:1. src/agent.rs2. src/chat_log.rs3. src/context.rs4. src/hooks.rs5. src/lib.rs6. src/luck_compile.rs7. src/luck_plan.rs8. src/luck_scheduler.rs9. src/"
+    },
+    {
+      "q": "что бы ты улучшил в этом проекте в первую очередь",
+      "ok": true,
+      "dur_s": 7.3,
+      "issues": [
+        "нет ключевого слова (улучш)"
+      ],
+      "answer": "Я бы начал с наиболее проблемных мест по приоритету: 1. Безопасность (самое важное) — в src/safety/mod.rs уже есть две TODO именно на эту тему:- не проверяется, пытается ли агент отправить sensitive д"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "ts": "20260807_100235",
+  "total": 5,
+  "ok": 5,
+  "fail": 0,
+  "restart_every": 6,
+  "results": [
+    {
+      "q": "привет",
+      "ok": true,
+      "dur_s": 3.3,
+      "issues": [],
+      "answer": "Привет! Чем могу помочь? ввод ◆ deepseek-chat · ветка main"
+    },
+    {
+      "q": "найди все TODO в src через grep и скажи где",
+      "ok": true,
+      "dur_s": 5.3,
+      "issues": [],
+      "answer": "Вот все TODO в src:1. **src/luck_scheduler.rs, строка 359** // v1: не исполняются (SPAWN — вложенный план, TODO; Document — внешние артефакты).2. ** src/safety/mod.rs, строка 180** // TODO: Проверять,"
+    },
+    {
+      "q": "прочитай файл src/main.rs и скажи, что он делает",
+      "ok": true,
+      "dur_s": 9.3,
+      "issues": [],
+      "answer": "Файл src/main.rs — это точка входа (точнее, бинарный CLI-фронтенд) для «AI Agent». Что он делает: Основная функция — запуск интерактивного агента с файловыми инструментами (такого же, как я), с двумя "
+    },
+    {
+      "q": "сколько модулей в src и какие",
+      "ok": true,
+      "dur_s": 8.3,
+      "issues": [],
+      "answer": "В src/lib.rs объявлено 15 публичных модулей:1. types2. provider3. context4. tool_routing5. safety6. agent7. hooks8. memory9. orchestrator10. config 11. chat_log12. luck_plan13. luck_compile14. luck_sc"
+    },
+    {
+      "q": "что бы ты улучшил в этом проекте в первую очередь",
+      "ok": true,
+      "dur_s": 9.3,
+      "issues": [],
+      "answer": "Не залезая глубоко в дебри, я бы обратил внимание на следующие моменты (по приоритету): 1. Обработка CLI-команд и слабая навигацияСейчас во встроенных командах (/switch, /rename) разбор аргументов «на"
+    }
+  ]
+}
