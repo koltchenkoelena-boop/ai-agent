@@ -1,0 +1,30 @@
+{
+  "ts": "20260807_082410",
+  "total": 3,
+  "ok": 3,
+  "fail": 0,
+  "restart_every": 2,
+  "results": [
+    {
+      "q": "привет",
+      "ok": true,
+      "dur_s": 3.3,
+      "issues": [],
+      "answer": "Привет! Чем могу помочь? ввод ◆ deepseek-chat · ветка main"
+    },
+    {
+      "q": "найди все TODO в src через grep и скажи где",
+      "ok": true,
+      "dur_s": 5.3,
+      "issues": [],
+      "answer": "Нашёл TODO в src:1. **src/luck_scheduler.rs:359** — комментарий про SPAWN (вложенный план) и Document (внешние артефакты), помечен как TODO. Это пояснение к логике исполнения шагов, а не сам TODO, но "
+    },
+    {
+      "q": "сколько модулей в src",
+      "ok": true,
+      "dur_s": 6.3,
+      "issues": [],
+      "answer": "В src 14 модулей (включая подмодули во вложенных директориях config, memory, safety, tool_routing).Прямых модулей на верхнем уровне — 10:- agent.rs- chat_log.rs- config/ (mod.rs)- context.rs- hooks.rs"
+    }
+  ]
+}

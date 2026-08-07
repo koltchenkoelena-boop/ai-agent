@@ -1,0 +1,46 @@
+{
+  "ts": "20260807_082936",
+  "total": 5,
+  "ok": 4,
+  "fail": 1,
+  "restart_every": 6,
+  "results": [
+    {
+      "q": "привет",
+      "ok": true,
+      "dur_s": 3.3,
+      "issues": [],
+      "answer": "Привет! Чем я могу помочь? ввод ◆ deepseek-chat · ветка main"
+    },
+    {
+      "q": "найди все TODO в src через grep и скажи где",
+      "ok": true,
+      "dur_s": 4.3,
+      "issues": [],
+      "answer": "Вот все TODO в папке src:1. src/luck_scheduler.rs:359 — комментарий про SPAWN (вложенный план) и Document (внешние артефакты), отмеченные как TODO.2. src/safety/mod.rs:180 — TODO: проверять, не пытает"
+    },
+    {
+      "q": "прочитай файл src/main.rs и скажи, что он делает",
+      "ok": true,
+      "dur_s": 10.3,
+      "issues": [],
+      "answer": "Вот что делает src/main.rs — это точка входа в AI Agent, объединяющая интерактивный CLI и WebSocket-фронтенд. Общий замысел: программа запускает агента с LLM-провайдером через FallbackProvider, подклю"
+    },
+    {
+      "q": "сколько модулей в src и какие",
+      "ok": true,
+      "dur_s": 9.3,
+      "issues": [],
+      "answer": "В папке src 20 файлов .rs, объединяющихся в 14 модулей (объявленных в src/lib.rs) плюс бинарник main.rs: **Модули из lib.rs (13):**1. types — общие типы2. provider — провайдеры LLM (FallbackProvider)3"
+    },
+    {
+      "q": "что бы ты улучшил в этом проекте в первую очередь",
+      "ok": false,
+      "dur_s": 11.4,
+      "issues": [
+        "нет ключевого слова (улучш)"
+      ],
+      "answer": "ввод ◆ deepseek-chat · ветка main"
+    }
+  ]
+}
