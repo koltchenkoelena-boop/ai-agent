@@ -17,6 +17,7 @@ case "$mode" in
     echo "→ Local Ollama (${OLLAMA_BASE_URL:-http://localhost:11434}, model: ${AI_AGENT_MODEL:-nemotron-3-super:cloud})"
     unset AGENT_PROVIDER_POOL
     unset OLLAMA_API_KEY
+    unset OLLAMA_CLOUD_API_KEY
     export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
     export AI_AGENT_MODEL="${AI_AGENT_MODEL:-nemotron-3-super:cloud}"
     ;;
@@ -31,15 +32,13 @@ case "$mode" in
     ;;
 
   openrouter|3)
-    echo "→ Ollama.com Custom API (OllamaChat)"
+    echo "→ OpenRouter"
     unset AGENT_PROVIDER_POOL
-    : "${OLLAMA_CLOUD_API_KEY:?OLLAMA_CLOUD_API_KEY not set}"
-
-    # Базовый URL для Ollama-адаптера (код сам добавит /api/chat)
-    export OLLAMA_BASE_URL="https://ollama.com"
-
-    export AI_AGENT_MODEL="nemotron-3-super:cloud"
-    export AI_AGENT_PROVIDER_KIND="OllamaChat" # <--- Включаем Ollama спецификацию
+    unset OLLAMA_CLOUD_API_KEY
+    export AGENT_PROVIDER_POOL="https://openrouter.ai/api/v1"
+    : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY not set}"
+    unset OLLAMA_API_KEY
+    export AI_AGENT_MODEL="${AI_AGENT_MODEL:-nvidia/nemotron-3-super-120b-a12b:free}"
     ;;
 
   cloud|4)

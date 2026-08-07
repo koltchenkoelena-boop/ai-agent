@@ -1,0 +1,48 @@
+{
+  "ts": "20260807_083720",
+  "total": 5,
+  "ok": 3,
+  "fail": 2,
+  "restart_every": 6,
+  "results": [
+    {
+      "q": "привет",
+      "ok": false,
+      "dur_s": 3.3,
+      "issues": [
+        "нет ключевого слова (привет)"
+      ],
+      "answer": "Привет! Чем могу помочь? ввод ◆ deepseek-chat · ветка main"
+    },
+    {
+      "q": "найди все TODO в src через grep и скажи где",
+      "ok": true,
+      "dur_s": 5.3,
+      "issues": [],
+      "answer": "В src нашёл 3 упоминания TODO:1. **src/luck_scheduler.rs** (строка 359) — комментарий про неисполняемые типы (SPAWN и Document), не оформлен как TODO:, но содержит слово TODO в тексте.2. **src/safety/"
+    },
+    {
+      "q": "прочитай файл src/main.rs и скажи, что он делает",
+      "ok": true,
+      "dur_s": 10.3,
+      "issues": [],
+      "answer": "src/main.rs — это точка входа в AI-агента: интерактивный CLI с опциональным веб-интерфейсом и TUI-режимом. Вот что он делает по шагам:1. Парсинг флагов - --config/-c — открывает интерактивное меню кон"
+    },
+    {
+      "q": "сколько модулей в src и какие",
+      "ok": true,
+      "dur_s": 8.3,
+      "issues": [],
+      "answer": "В src 21 файл .rs, но модулей — 15 (плюс бинарь main). Вот структура: Корневые модули (объявлены в src/lib.rs):1. types — src/types.rs2. provider — src/provider.rs3. context — src/context.rs4. tool_ro"
+    },
+    {
+      "q": "что бы ты улучшил в этом проекте в первую очередь",
+      "ok": false,
+      "dur_s": 17.4,
+      "issues": [
+        "повтор предыдущего ответа"
+      ],
+      "answer": "В src 21 файл .rs, но модулей — 15 (плюс бинарь main). Вот структура: Корневые модули (объявлены в src/lib.rs):1. types — src/types.rs2. provider — src/provider.rs3. context — src/context.rs4. tool_ro"
+    }
+  ]
+}

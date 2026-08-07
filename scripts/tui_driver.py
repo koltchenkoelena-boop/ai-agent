@@ -74,8 +74,14 @@ def send(text, wait=0.8):
     time.sleep(wait)
 
 
-def read(clean=True, last_lines=None):
-    r = tmux("capture-pane", "-t", SESSION, "-p")
+def read(clean=True, last_lines=None, history=False):
+    # -S -3000: включить скроллбэк, иначе на длинных ответах маркер "🤖"
+    # текущего хода может уехать выше видимой области раньше, чем
+    # дорисуется весь текст, и ask() подхватит старый маркер с экрана.
+    args = ["capture-pane", "-t", SESSION, "-p"]
+    if history:
+        args += ["-S", "-3000"]
+    r = tmux(*args)
     pane = r.stdout
     if last_lines:
         pane = "\n".join(pane.splitlines()[-last_lines:])
@@ -125,7 +131,7 @@ def ask(text, timeout=180):
             # Экран стабилен и агент не думает — ответ готов.
             break
         last = pane
-    out = "\n".join(dialog(read()))
+    out = "\n".join(dialog(read(history=True)))
     log_record("answer", out)
     # Пустой ответ (нет ответа модели) — считаем ошибкой, а не успехом.
     text_after = ""
