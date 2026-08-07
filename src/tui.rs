@@ -285,6 +285,56 @@ struct App {
     last_ctrl_c: Option<std::time::Instant>,
 }
 
+/// Перенос длинной строки (спанов) по ширине — длинные ответы модели
+/// не должны уходить за правый край экрана.
+fn split_word(word: &str, style: Style, width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut rest = word;
+    while rest.chars().count() > width {
+        let take: String = rest.chars().take(width).collect();
+        out.push(Span::styled(take.clone(), style));
+        rest = &rest[take.len()..];
+    }
+    if !rest.is_empty() {
+        out.push(Span::styled(rest.to_string(), style));
+    }
+    out
+}
+
+fn wrap_line(spans: &[Span<'static>], width: usize) -> Vec<Line<'static>> {
+    let width = width.max(10);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut cur_len = 0usize;
+    for sp in spans {
+        let style = sp.style;
+        let text = sp.content.to_string();
+        for tok in text.split_inclusive(' ') {
+            let tl = tok.chars().count();
+            if tl > width {
+                if !cur.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut cur)));
+                    cur_len = 0;
+                }
+                for piece in split_word(tok, style, width) {
+                    lines.push(Line::from(vec![piece]));
+                }
+                continue;
+            }
+            if cur_len + tl > width && !cur.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut cur)));
+                cur_len = 0;
+            }
+            cur.push(Span::styled(tok.to_string(), style));
+            cur_len += tl;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(Line::from(cur));
+    }
+    lines
+}
+
 impl App {
     fn new(model: &str, branch: &str, tool_count: usize) -> Self {
         let mut app = Self {
@@ -325,9 +375,11 @@ impl App {
 
         let max_lines = (chunks[0].height as usize).saturating_sub(2);
         let start = self.lines.len().saturating_sub(max_lines).saturating_sub(self.scroll as usize);
+        let content_width = (chunks[0].width as usize).saturating_sub(2);
         let items: Vec<ListItem> = self.lines[start..]
             .iter()
-            .map(|l| ListItem::new(Line::from(l.spans.clone())))
+            .flat_map(|l| wrap_line(&l.spans, content_width))
+            .map(ListItem::new)
             .collect();
 
         let list = List::new(items)
