@@ -56,8 +56,10 @@
   ws://0.0.0.0:8080/ws
   FrontendEvent: AgentMessage | ToolExecuting
   | ToolResult | SafetyReviewRequired
-  | ContextBranched | Ping
-  heartbeat Ping every 30s
+  | ContextBranched | ModelInfo | PlanProgress
+  | AgentActivity | Ping (heartbeat, 30s)
+  ClientCommand: StartTask | SwitchBranch
+  | StartPlan | SafetyResponse | Abort
 ═══════════════════════════════════════════
 
 ═══════════════════════════════════════════
@@ -85,6 +87,9 @@
 | 10 | **Graceful Shutdown** | ✅ | Ctrl+C → snapshot всех веток → history_dump.json → остановка фронтенд-сервера |
 | 11 | **Credential Rotator** | ✅ | `CredentialRotator` — thread-safe round-robin по пулу эндпоинтов; `AGENT_PROVIDER_POOL` env для конфигурации |
 | 12 | **413 Auto-Retry** | ✅ | Перехват `ProviderError::ApiError(413)` — удаление старейшей tool_call/tool_result пары + retry |
+| 13 | **TUI** | ✅ | `ratatui`-интерфейс (`--tui`): слэш-команды, живой статус, markdown, Luck-планы (см. раздел ниже) |
+| 14 | **Luck-планы** | ✅ | `luck_compile` → `luck_plan` (валидация DAG/контрактов VERIFY/POLICY) → `luck_scheduler` (исполнение с прогрессом) |
+| 15 | **Memory (RAG)** | ✅ | `memory::vector_db` — векторное хранилище на `sled` для семантического поиска по контексту |
 
 ## Быстрый старт
 
@@ -127,7 +132,7 @@ cargo test --lib
 - Ключ задаётся через `OLLAMA_CLOUD_API_KEY`:
 
 ```bash
-export OLLAMA_CLOUD_API_KEY="fd62069eede24555a8d5743dc1b8f9ae.XnkOyaZMGjgd4mpzR5cOCM3W"
+export OLLAMA_CLOUD_API_KEY="<ваш ключ Ollama Cloud>"
 ./run.sh cloud
 ```
 
@@ -171,9 +176,62 @@ chat_logs/2026-07-14_00-27-58.jsonl
 - **stderr** — human-readable формат (цветной, с уровнями)
 - **JSON Lines** — машинно-читаемый файл для анализа и отладки
 
+## TUI (полноэкранный интерфейс)
+
+```bash
+cargo run -- --tui
+# или через run.sh:
+./run.sh local --tui
+```
+
+Полноэкранный интерфейс на `ratatui` в стиле grok-build. Особенности:
+
+- **Слэш-команды**: `/help`, `/tools`, `/branch [name]`, `/clear`, `/plan <file.luck>`, `/quit`
+- **Горячие клавиши**: Enter — отправить, Esc / одиночный Ctrl+C — прервать текущий запрос, двойной Ctrl+C (< 1.5с) — выход, ↑/↓ — история ввода, PageUp/PageDown — скролл ленты
+- **Живой статус агента** в статус-баре: `◆ думает… Ns · шаг N: …` (текущий тул, ожидание LLM, компакция контекста) — обновляется в реальном времени через `FrontendEvent::AgentActivity`
+- **Markdown-рендер** ответов (заголовки, `**bold**`, `*italic*`, `` `code` ``, ```` ``` ```` fences) с переносом строк по display-width (корректно для кириллицы/emoji)
+- **Luck-планы**: `/plan <file>` компилирует и исполняет `.luck`-план с прогрессом по узлам (см. [docs/luck-integration.md](docs/luck-integration.md))
+- Ошибка тула не роняет сессию — попадает в контекст как результат тула, агент продолжает работу
+
+### Автоматизированное тестирование TUI (tmux-драйвер)
+
+Раздел для CI/само-тестирования агента — не требует ручного взаимодействия:
+
+```bash
+python3 scripts/tui_driver.py start          # поднять TUI в tmux-сессии ai-tui-test
+python3 scripts/tui_driver.py ask "текст"    # ввод + ожидание ответа, печатает диалог
+python3 scripts/tui_driver.py read           # прочитать текущий экран
+python3 scripts/tui_driver.py stop           # Ctrl+C + kill сессии
+python3 scripts/tui_driver.py status         # жива ли сессия
+
+# Батч-прогон с рестартом сессии каждые N вопросов (для длинных серий)
+python3 scripts/batch_ask.py --questions "q1|q2|q3" --restart-every 10
+
+# Живой просмотр
+tmux attach -t ai-tui-test   # отсоединиться: Ctrl+B, D
+```
+
+### Цикл самосовершенствования
+
+`scripts/self_improve.py` — прогоняет сценарий вопросов через TUI-драйвер, анализирует ответы
+(пустой ответ / ошибка провайдера / повтор / слишком долго / отсутствие ключевого слова) и
+пишет отчёт в `out/self_improve_<ts>.json` (exit 0 — ок, exit 1 — есть проблемы):
+
+```bash
+python3 scripts/self_improve.py
+python3 scripts/self_improve.py --questions "привет|найди TODO через grep" --target "привет|TODO"
+
+# Многократный прогон со сбором статистики (для регрессионного тестирования):
+scripts/loop_stats.sh 100   # пишет out/loop_stats_<ts>.jsonl + .log
+```
+
+Подробный цикл «прогон → анализ → правка → повтор» описан в `CLAUDE.md`.
+
 ## Интерактивный CLI
 
-При запуске `ai-agent` открывается диалоговый цикл. Все сообщения отправляются LLM. Встроенные команды:
+При запуске `ai-agent` (без `--tui`) открывается диалоговый цикл в терминале — те же команды,
+что и в TUI, плюс запуск на порту 8080 веб-фронтенда (см. ниже). Все сообщения отправляются LLM.
+Встроенные команды:
 
 | Команда | Описание |
 |---------|----------|
@@ -192,6 +250,23 @@ Safety-пайплайн логируется через `tracing` (stderr): `[SA
 Авто-компакция контекста: при превышении лимита сообщений (по умолчанию 15) агент вызывает LLM для суммаризации старых сообщений, сохраняя последние 4 нетронутыми.
 
 **413 Context Overflow**: при ответе провайдера `API Error (Status 413)` агент автоматически удаляет старейшую пару (tool_call + tool_result) из контекста и повторяет запрос. Однократный retry.
+
+## Веб-фронтенд
+
+Тот же CLI-цикл (без `--tui`) поднимает на порту 8080 WebSocket-сервер (`axum`) и отдаёт статику
+из `static/index.html` — функционал приближён к TUI:
+
+- **Живой статус агента** в шапке — тот же `AgentActivity`, что и в TUI ("шаг N: модель думает…")
+- **Markdown-рендер** ответов ассистента (заголовки, `**bold**`, `` `code` ``, fences)
+- **Слэш-команды** в поле ввода: `/help`, `/tools`, `/clear` (только в браузере), `/branch <name>`
+  (переключение веток контекста прямо из веб-UI)
+- **Кнопка Stop** — прерывает текущий запрос к агенту (`ClientCommand::Abort`), аналог Ctrl+C в TUI;
+  запуск агента выполняется в отменяемом tokio-таске
+- Бейдж текущей ветки контекста в шапке, дерево веток и safety-review модалка в сайдбаре
+- Ошибка провайдера не роняет сервер — показывается в UI, сессия продолжает работать
+
+Не перенесено из TUI: `/swarm` (параллельные суб-агенты) — требует отдельных WS-событий для
+отображения нескольких параллельных агентов, пока доступно только в терминальном CLI.
 
 ## Переменные окружения
 
@@ -245,8 +320,16 @@ docker run -d \
 
 ```
 cargo test --lib
-# 54 теста: context (19), safety (14), agent (3), tool_routing (3), hooks (2), platform (12), orchestrator (1)
+# 104 теста: context (23), tool_routing::platform (18), safety (14), luck_plan (10),
+# luck_compile (8), tui (7), memory::vector_db (7), luck_scheduler (5), agent (4),
+# tool_routing (3), provider (2), hooks (2), orchestrator (1)
 ```
+
+## Документация
+
+- [docs/luck-integration.md](docs/luck-integration.md) — интеграция Luck-планов (compile → schedule → execute)
+- [docs/provider-evolution.md](docs/provider-evolution.md) — история эволюции провайдер-слоя (CredentialRotator, Bearer-auth, run.sh)
+- `CLAUDE.md` — инструкции для Claude Code: цикл самосовершенствования, команды драйвера TUI, правила правок
 
 ## Лицензия
 
