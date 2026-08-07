@@ -395,11 +395,15 @@ impl App {
             .split(f.area());
 
         let max_lines = (chunks[0].height as usize).saturating_sub(2);
-        let start = self.lines.len().saturating_sub(max_lines).saturating_sub(self.scroll as usize);
         let content_width = (chunks[0].width as usize).saturating_sub(2);
-        let items: Vec<ListItem> = self.lines[start..]
+        let wrapped: Vec<Line<'static>> = self.lines
             .iter()
             .flat_map(|l| wrap_line(&l.spans, content_width))
+            .collect();
+        let start = wrapped.len().saturating_sub(max_lines).saturating_sub(self.scroll as usize);
+        let items: Vec<ListItem> = wrapped[start..]
+            .iter()
+            .cloned()
             .map(ListItem::new)
             .collect();
 

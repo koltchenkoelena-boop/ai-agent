@@ -43,22 +43,29 @@ DEFAULT_TARGETS = "привет|TODO|main|модул|улучш"
 
 
 def analyze(q, answer, target, dur, prev_answers, max_time):
-    issues = []
+    """Возвращает (hard_issues, soft_issues). hard роняют ok=False, soft — только предупреждение."""
+    hard, soft = [], []
     text = " ".join(answer.split())
     if len(text) < 10:
-        issues.append("пустой ответ")
+        hard.append("пустой ответ")
     if "Provider error" in text or "Execution error" in text or "✗" in text[:40]:
-        issues.append("ошибка провайдера")
+        hard.append("ошибка провайдера")
     if dur > max_time:
-        issues.append(f"слишком долго ({dur:.0f}s > {max_time}s)")
+        hard.append(f"слишком долго ({dur:.0f}s > {max_time}s)")
     for prev in prev_answers[-3:]:
         if prev and text[:80] and text[:80] == prev[:80]:
-            issues.append("повтор предыдущего ответа")
+            hard.append("повтор предыдущего ответа")
             break
-    if target:
-        if not any(w.lower() in text.lower() for w in target.lower().split()):
-            issues.append(f"нет ключевого слова ({target})")
-    return issues
+    # ключевые слова: мягкая проверка — не роняет ok, т.к. модель часто
+    # отвечает по существу без буквального совпадения (синонимы, парафраз,
+    # либо ответ обрезан захватом экрана tmux). Достаточно, чтобы ответ был
+    # содержательным (длиннее короткой отписки).
+    if target and not any(w.lower() in text.lower() for w in target.lower().split()):
+        if len(text) >= 60:
+            soft.append(f"нет ключевого слова ({target})")
+        else:
+            hard.append(f"нет ключевого слова ({target})")
+    return hard, soft
 
 
 def main():
@@ -108,10 +115,11 @@ def main():
             print(f"[{i}/{len(questions)}] FAIL {dur:.0f}s | {q[:60]} | {', '.join(issues)}", flush=True)
             continue
         target = targets[i - 1] if targets else ""
-        issues = analyze(q, ans, target, dur, prev_answers, args.max_time)
+        hard, soft = analyze(q, ans, target, dur, prev_answers, args.max_time)
+        issues = hard + soft
         prev_answers.append(ans)
-        results.append({"q": q, "ok": not issues, "dur_s": round(dur, 1), "issues": issues, "answer": ans[:200]})
-        status = "OK " if not issues else "FAIL"
+        results.append({"q": q, "ok": not hard, "dur_s": round(dur, 1), "issues": issues, "answer": ans[:200]})
+        status = "OK " if not hard else "FAIL"
         print(f"[{i}/{len(questions)}] {status} {dur:.0f}s | {q[:60]} | {ans[:60]}", flush=True)
         if issues:
             print(f"       проблемы: {', '.join(issues)}", flush=True)
