@@ -3,7 +3,11 @@
 TUI-драйвер для тестов ai-agent (tmux-хак).
 Имитирует ввод/чтение в окне терминала с TUI-режимом (ratatui):
 
-  start                 — запустить `cargo run -- --tui` в tmux-сессии ai-tui-test
+  build                 — собрать бинарник один раз (cargo build); вызывать перед start()
+  start                 — запустить собранный бинарник (target/debug/ai-agent --tui)
+                           в tmux-сессии ai-tui-test. Бинарник НЕ пересобирается —
+                           собрать заранее: `cargo build` (см. build_binary() /
+                           scripts/loop_stats.sh, который делает это один раз перед циклом)
   ask "<текст>"         — отправить запрос, дождаться ответа (ждёт исчезновения «думает»),
                            печатает текст экрана (скроллбек) в stdout
   send "<текст>"        — только отправить (без ожидания)
@@ -25,8 +29,28 @@ import datetime
 
 SESSION = "ai-tui-test"
 WORKDIR = "/home/avk/ws1/ai-agent"
-RUN_CMD = "cargo run -- --tui"
+BINARY = WORKDIR + "/target/debug/ai-agent"
+# Запускаем готовый бинарник напрямую (не `cargo run`) — иначе каждый старт
+# TUI заново гоняет cargo-проверку/пересборку и грузит все ядра CPU, что на
+# длинных сериях (self_improve/loop_stats) подвешивает систему (см. отчёт
+# пользователя: "мышь перестала работать после веб-UI пайпа" — виновата была
+# параллельная пересборка, а не сам агент). Бинарник собирается один раз
+# заранее (build_binary() / вызывающий скрипт), тут — только запуск.
+RUN_CMD = f"{BINARY} --tui"
 LOG_PATH = WORKDIR + "/tests/dialog_log.jsonl"
+
+
+def build_binary():
+    """Собрать бинарник один раз (debug). Вызывать перед серией start()."""
+    print("Собираю бинарник (cargo build)...", file=sys.stderr)
+    r = subprocess.run(
+        ["cargo", "build"], cwd=WORKDIR, capture_output=True, text=True, timeout=600,
+    )
+    if r.returncode != 0:
+        print(r.stdout[-2000:], file=sys.stderr)
+        print(r.stderr[-2000:], file=sys.stderr)
+        raise RuntimeError("cargo build failed")
+    print("Бинарник собран.", file=sys.stderr)
 
 
 def log_record(kind, text):
@@ -51,6 +75,12 @@ def tmux(*args, timeout=30):
 
 
 def start():
+    import os
+    if not os.path.isfile(BINARY):
+        raise RuntimeError(
+            f"Бинарник не найден: {BINARY}. Собери его заранее: "
+            f"`cargo build` (или вызови build_binary())."
+        )
     tmux("kill-session", "-t", SESSION)  # на всякий случай убрать старую
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", SESSION, "-x", "160", "-y", "45",
@@ -164,7 +194,9 @@ def main():
         print(__doc__)
         return
     cmd = args[0]
-    if cmd == "start":
+    if cmd == "build":
+        build_binary()
+    elif cmd == "start":
         start()
     elif cmd == "ask":
         text = " ".join(args[1:])

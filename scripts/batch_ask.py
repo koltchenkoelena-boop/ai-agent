@@ -62,6 +62,9 @@ def main():
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     os.makedirs(OUT_DIR, exist_ok=True)
 
+    if not os.path.isfile(td.BINARY):
+        td.build_binary()
+
     r = subprocess.run(["tmux", "has-session", "-t", td.SESSION], capture_output=True)
     if r.returncode != 0:
         td.start()
