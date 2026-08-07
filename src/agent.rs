@@ -793,7 +793,14 @@ impl<P: ModelProvider> Agent<P> {
                         exec_elapsed.as_millis(),
                         e,
                     );
-                    return Err(AgentError::ToolExecution(e));
+                    // Ошибка тула не роняет run: показываем модели результат с ошибкой
+                    // (она увидит и исправит: другой аргумент/другой тул).
+                    self.context.push(Message {
+                        role: Role::Tool,
+                        content: Some(format!("Error: {e}")),
+                        tool_calls: None,
+                        tool_call_id: Some(call.id.clone()),
+                    });
                 }
             }
         }

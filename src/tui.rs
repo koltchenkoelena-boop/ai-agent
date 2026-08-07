@@ -287,13 +287,29 @@ struct App {
 
 /// Перенос длинной строки (спанов) по ширине — длинные ответы модели
 /// не должны уходить за правый край экрана.
+/// ВАЖНО: считаем DISPLAY WIDTH (unicode-width), а не число символов:
+/// кириллица и emoji занимают 2 колонки.
 fn split_word(word: &str, style: Style, width: usize) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthStr;
     let mut out = Vec::new();
     let mut rest = word;
-    while rest.chars().count() > width {
-        let take: String = rest.chars().take(width).collect();
-        out.push(Span::styled(take.clone(), style));
-        rest = &rest[take.len()..];
+    while UnicodeWidthStr::width(rest) > width {
+        // Накапливаем символы, пока display-ширина не превысит width.
+        let mut acc = String::new();
+        let mut acc_w = 0usize;
+        for ch in rest.chars() {
+            let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if acc_w + ch_w > width && !acc.is_empty() {
+                break;
+            }
+            acc.push(ch);
+            acc_w += ch_w;
+        }
+        if acc.is_empty() {
+            break; // защита от бесконечного цикла
+        }
+        out.push(Span::styled(acc.clone(), style));
+        rest = &rest[acc.len()..];
     }
     if !rest.is_empty() {
         out.push(Span::styled(rest.to_string(), style));
@@ -302,6 +318,7 @@ fn split_word(word: &str, style: Style, width: usize) -> Vec<Span<'static>> {
 }
 
 fn wrap_line(spans: &[Span<'static>], width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
     let width = width.max(10);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut cur: Vec<Span<'static>> = Vec::new();
@@ -310,7 +327,7 @@ fn wrap_line(spans: &[Span<'static>], width: usize) -> Vec<Line<'static>> {
         let style = sp.style;
         let text = sp.content.to_string();
         for tok in text.split_inclusive(' ') {
-            let tl = tok.chars().count();
+            let tl = UnicodeWidthStr::width(tok);
             if tl > width {
                 if !cur.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut cur)));
