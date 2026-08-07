@@ -204,6 +204,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut line_buf = String::new();
     let mut shutdown_requested = false;
     let mut cmd_rx = cmd_rx; // ensure mut for recv
+    // Текущий запуск агента (для Abort из веб-UI) + канал результата.
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
+    let mut current_abort: Option<tokio::task::AbortHandle> = None;
 
     loop {
         line_buf.clear();
@@ -303,6 +306,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // SafetyResponse направляется отдельным каналом в агент
                         continue;
                     }
+                    Some(ClientCommand::Abort) => {
+                        if let Some(h) = current_abort.take() {
+                            h.abort();
+                            println!("\n[UI] Task aborted\n");
+                            let _ = frontend_tx.send(FrontendEvent::AgentMessage {
+                                content: "⛔ Aborted".into(),
+                            });
+                        }
+                        continue;
+                    }
                     None => {
                         // Канал закрыт — сервер остановлен
                         continue;
@@ -313,6 +326,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n[INFO] Ctrl+C received — shutting down gracefully...");
                 shutdown_requested = true;
                 break;
+            }
+            Some((answer, err)) = result_rx.recv() => {
+                current_abort = None;
+                if err.is_empty() {
+                    let _ = frontend_tx.send(FrontendEvent::AgentMessage {
+                        content: answer.clone(),
+                    });
+                    println!("\n  Assistant: {answer}\n");
+                } else {
+                    let _ = frontend_tx.send(FrontendEvent::AgentMessage {
+                        content: format!("⚠️ Error: {err}"),
+                    });
+                    eprintln!("Error: {err}");
+                    // Не роняем сервер целиком на ошибке одного запроса (сетевой сбой,
+                    // таймаут провайдера и т.п.) — как и TUI, показываем ошибку и живём дальше.
+                }
+                continue;
             }
         };
 
@@ -469,30 +499,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             a.context.push(Message::new(Role::User, &input));
         }
 
-        // ── Запуск агента ───────────────────────────────────────────────
-        let run_result = {
-            let mut a = agent.lock().await;
-            a.run(model.as_str()).await
-        };
-        match run_result {
-            Ok(response) => {
-                let _ = frontend_tx.send(FrontendEvent::AgentMessage {
-                    content: response.clone(),
-                });
-                println!("\n  Assistant: {response}\n");
-            }
-            Err(e) => {
-                let err_msg = format!("{e}");
-                let _ = frontend_tx.send(FrontendEvent::AgentMessage {
-                    content: format!("⚠️ Error: {err_msg}"),
-                });
-                eprintln!("Error: {e}");
-                if matches!(&e, ai_agent::agent::AgentError::UserAbort) {
-                    continue;
-                }
-                break;
-            }
-        }
+        // ── Запуск агента (в отдельном таске — чтобы Abort мог его прервать) ──
+        let a2 = agent.clone();
+        let m2 = model.clone();
+        let rt = result_tx.clone();
+        let jh = tokio::spawn(async move {
+            let out = {
+                let mut a = a2.lock().await;
+                a.run(&m2).await
+            };
+            let (answer, err) = match out {
+                Ok(a) => (a, String::new()),
+                Err(e) => (String::new(), e.to_string()),
+            };
+            let _ = rt.send((answer, err)).await;
+        });
+        current_abort = Some(jh.abort_handle());
     }
 
     // ---- Персистентный снапшот на выходе ----------------------------------
