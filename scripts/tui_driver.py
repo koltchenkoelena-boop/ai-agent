@@ -104,13 +104,22 @@ def dialog(pane):
     return out
 
 
+def alive():
+    """Жива ли tmux-сессия? (проверка перед ask — иначе send уходит в никуда)."""
+    return tmux("has-session", "-t", SESSION).returncode == 0
+
+
 def ask(text, timeout=180):
+    if not alive():
+        raise RuntimeError("tmux сессия мертва — вызови start() перед ask()")
     send(text, wait=0.3)
     log_record("question", text)
     t0 = time.time()
     last = ""
     while time.time() - t0 < timeout:
         time.sleep(1)
+        if not alive():
+            raise RuntimeError("tmux сессия умерла во время ожидания ответа")
         pane = read()
         if pane == last and not waiting(pane):
             # Экран стабилен и агент не думает — ответ готов.
@@ -118,6 +127,12 @@ def ask(text, timeout=180):
         last = pane
     out = "\n".join(dialog(read()))
     log_record("answer", out)
+    # Пустой ответ (нет ответа модели) — считаем ошибкой, а не успехом.
+    text_after = ""
+    if "🤖" in out:
+        text_after = out.rsplit("🤖", 1)[1]
+    if not " ".join(text_after.split()).strip():
+        raise RuntimeError("пустой ответ (агент не ответил на запрос)")
     return out
 
 

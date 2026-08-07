@@ -470,6 +470,9 @@ impl<P: ModelProvider> Agent<P> {
             tools_count,
         );
         self.emit_activity(&format!("шаг {step}: модель думает… ({model})"));
+        // Клоны для повторной попытки при битом стриме (reqwest decode error).
+        let retry_messages = messages.clone();
+        let retry_tools = tools.clone();
         let llm_start = std::time::Instant::now();
         let mut stream = match self.provider.stream_chat(model, messages, tools).await {
             Ok(s) => s,
@@ -509,11 +512,37 @@ impl<P: ModelProvider> Agent<P> {
         let ttfb = llm_start.elapsed();
         let mut chunk_count = 0usize;
         let mut acc = StreamAccumulator::new();
+        let mut retried = false;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            chunk_count += 1;
-            acc.push(&chunk);
+        // Чтение стрима с одной повторной попыткой: некоторые прокси отдают
+        // оборванное тело ("error decoding response body") — повторяем запрос.
+        loop {
+            match stream.next().await {
+                Some(Ok(chunk)) => {
+                    chunk_count += 1;
+                    acc.push(&chunk);
+                }
+                Some(Err(e)) => {
+                    if !retried {
+                        tracing::warn!(
+                            stage = "llm_stream_retry",
+                            step,
+                            error = %e,
+                            "stream error, retrying once: {e}"
+                        );
+                        stream = self
+                            .provider
+                            .stream_chat(model, retry_messages.clone(), retry_tools.clone())
+                            .await?;
+                        acc = StreamAccumulator::new();
+                        chunk_count = 0;
+                        retried = true;
+                        continue;
+                    }
+                    return Err(AgentError::Provider(e));
+                }
+                None => break,
+            }
         }
 
         let stream_elapsed = llm_start.elapsed();
