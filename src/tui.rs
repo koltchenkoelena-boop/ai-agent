@@ -210,6 +210,7 @@ fn format_event(ev: &FrontendEvent) -> Option<UILine> {
             };
             Some(UILine::plain(format!("  {icon} {node}"), color))
         }
+        FrontendEvent::AgentActivity { .. } => None, // не в скроллбек — только статус
         FrontendEvent::Ping => None,
     }
 }
@@ -283,6 +284,8 @@ struct App {
     abort: Option<tokio::task::AbortHandle>,
     /// Время последнего Ctrl+C — для двойного нажатия (выход).
     last_ctrl_c: Option<std::time::Instant>,
+    /// Текущая активность агента (AgentActivity) — живой статус.
+    activity: Option<String>,
 }
 
 /// Перенос длинной строки (спанов) по ширине — длинные ответы модели
@@ -364,6 +367,7 @@ impl App {
             started_at: None,
             abort: None,
             last_ctrl_c: None,
+            activity: None,
         };
         app.push(UILine::plain(
             "AI Agent TUI (стиль grok-build). /help — команды, Enter — отправить, Ctrl+C — выход.",
@@ -416,11 +420,11 @@ impl App {
         ));
 
         let status_text = if self.running {
-            if let Some(t) = self.started_at {
-                format!("{} · думает… {}s", self.status, t.elapsed().as_secs())
-            } else {
-                format!("{} · думает…", self.status)
-            }
+            let secs = self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            let act = self.activity.as_deref().unwrap_or("работает…");
+            // Сокращаем активность, чтобы уместилась в статус-бар.
+            let act_short: String = act.chars().take(50).collect();
+            format!("{} · думает… {secs}s · {act_short}", self.status)
         } else {
             self.status.clone()
         };
@@ -484,6 +488,7 @@ pub async fn run_tui(
                                     if let Some(h) = app.abort.take() { h.abort(); }
                                     app.running = false;
                                     app.started_at = None;
+                                    app.activity = None;
                                     app.status = format!("{model} · ветка {}", app.branch);
                                     app.push(UILine::plain("  ⛔ прервано (Ctrl+C)", palette::ERR));
                                 }
@@ -503,6 +508,7 @@ pub async fn run_tui(
                                     if let Some(h) = app.abort.take() { h.abort(); }
                                     app.running = false;
                                     app.started_at = None;
+                                    app.activity = None;
                                     app.status = format!("{model} · ветка {}", app.branch);
                                 }
                                 app.push(UILine::plain("  🤖 автономный режим — Hermes продолжает сам", palette::ACCENT));
@@ -515,6 +521,7 @@ pub async fn run_tui(
                                     if let Some(h) = app.abort.take() { h.abort(); }
                                     app.running = false;
                                     app.started_at = None;
+                                    app.activity = None;
                                     app.status = format!("{model} · ветка {}", app.branch);
                                     app.push(UILine::plain("  ⛔ прервано (Esc)", palette::ERR));
                                 }
@@ -669,8 +676,15 @@ pub async fn run_tui(
             }
             ev = frontend_rx.recv() => {
                 if let Ok(ev) = ev {
-                    if let Some(line) = format_event(&ev) {
-                        app.push(line);
+                    match ev {
+                        FrontendEvent::AgentActivity { text } => {
+                            app.activity = Some(text);
+                        }
+                        _ => {
+                            if let Some(line) = format_event(&ev) {
+                                app.push(line);
+                            }
+                        }
                     }
                 }
             }
@@ -678,6 +692,7 @@ pub async fn run_tui(
                 app.running = false;
                 app.started_at = None;
                 app.abort = None;
+                app.activity = None;
                 app.status = format!("{model} · ветка {}", app.branch);
                 if !line.is_empty() {
                     app.push(UILine::plain("  🤖", palette::ACCENT));

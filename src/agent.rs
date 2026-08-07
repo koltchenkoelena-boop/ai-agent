@@ -314,6 +314,15 @@ impl<P: ModelProvider> Agent<P> {
         self.frontend_tx = Some(tx);
     }
 
+    /// Живой статус для фронтенда/TUI (чем агент занят прямо сейчас).
+    fn emit_activity(&self, text: &str) {
+        if let Some(ref tx) = self.frontend_tx {
+            let _ = tx.send(FrontendEvent::AgentActivity {
+                text: text.to_string(),
+            });
+        }
+    }
+
     /// Установить получатель команд от фронтенда (для safety approval).
     pub fn set_safety_approval_rx(&mut self, rx: mpsc::Receiver<ClientCommand>) {
         self.safety_approval_rx = Some(rx);
@@ -333,6 +342,7 @@ impl<P: ModelProvider> Agent<P> {
     /// 5. Если есть тулы → проверка Safety → выполнение → возвращаем `None` (нужна ещё итерация)
     pub async fn run_step(&mut self, model: &str) -> Result<Option<String>, AgentError> {
         let step = self.step_number;
+        self.emit_activity(&format!("шаг {step}: обработка запроса…"));
 
         // --- Шаг 0: proactive compaction (Step C) ---
         let token_estimate = self.context.estimate_tokens();
@@ -343,6 +353,7 @@ impl<P: ModelProvider> Agent<P> {
                 token_estimate,
                 "Token estimate >6000, triggering proactive compaction"
             );
+            self.emit_activity(&format!("шаг {step}: компакция контекста…"));
             self.maybe_compact_context(model).await;
         } else {
             tracing::trace!(
@@ -458,6 +469,7 @@ impl<P: ModelProvider> Agent<P> {
             msg_count,
             tools_count,
         );
+        self.emit_activity(&format!("шаг {step}: модель думает… ({model})"));
         let llm_start = std::time::Instant::now();
         let mut stream = match self.provider.stream_chat(model, messages, tools).await {
             Ok(s) => s,
@@ -739,6 +751,7 @@ impl<P: ModelProvider> Agent<P> {
                 "Executing tool '{0}'",
                 call.function.name,
             );
+            self.emit_activity(&format!("шаг {step}: тул {}…", call.function.name));
             let result = self.router.route(call).await;
             let exec_elapsed = exec_start.elapsed();
 
